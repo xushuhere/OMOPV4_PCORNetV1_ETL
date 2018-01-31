@@ -1,23 +1,62 @@
 ﻿=======
 -- Person -> Demographic WITHOUT Biobank_flag
-insert into pcornet.demographic (patid, birth_date, birth_time, sex, hispanic, race, biobank_flag, raw_sex, raw_hispanic, raw_race)
-select distinct 
-	cast(p.person_id as text) as pat_id,
-	cast(year_of_birth as text)||(case when month_of_birth is null OR day_of_birth is null then '' else '-'||lpad(cast(month_of_birth as text),2,'0')||'-'||lpad(cast(day_of_birth as text),2,'0') end) as birth_date,	
-	null as birth_time,
-	coalesce (m1.target_concept,'OT') as Sex,
-	coalesce (m2.target_concept,'OT') as Hispanic,
-	coalesce (m3.target_concept,'OT') as Race,
-	null,
-	gender_source_value,
-	ethnicity_source_value,
-	race_source_value
-from
-	omop.person p
-	left join cz.cz_omop_pcornet_concept_map m1 on case when p.gender_concept_id is null AND m1.source_concept_id is null then true else p.gender_concept_id = m1.source_concept_id end and m1.source_concept_class='Gender'
-	left join cz.cz_omop_pcornet_concept_map m2 on case when p.ethnicity_concept_id is null AND m2.source_concept_id is null then true else p.ethnicity_concept_id = m2.source_concept_id end and m2.source_concept_class='Hispanic'
-	left join cz.cz_omop_pcornet_concept_map m3 on case when p.race_concept_id is null AND m3.source_concept_id is null then true else p.race_concept_id = m3.source_concept_id end and m3.source_concept_class = 'Race';
->>>>>>> FETCH_HEAD
+-- insert into pcornet.demographic (patid, birth_date, birth_time, sex, hispanic, race, biobank_flag, raw_sex, raw_hispanic, raw_race)
+SELECT 
+		PERSON_ID::CHARACTER VARYING(64) PATID
+		,BIRTH_DATETIME::DATE BIRTH_DATE
+		,'00:00'::CHARACTER VARYING(5) BIRTH_TIME
+	
+		-- convert SEX info from GENDER_CONCEPT_ID
+		,CASE WHEN P.GENDER_CONCEPT_ID =901001 THEN 'M'
+				WHEN P.GENDER_CONCEPT_ID =8551 THEN 'UN'
+				WHEN P.GENDER_CONCEPT_ID =0 THEN 'NI'
+				WHEN P.GENDER_CONCEPT_ID =1001001 THEN 'F'
+				WHEN P.GENDER_CONCEPT_ID =8532 THEN 'F'
+				WHEN P.GENDER_CONCEPT_ID =8507 THEN 'M'
+				ELSE 'OT' END :: CHARACTER VARYING(2) SEX
+			
+		, NULL::CHARACTER VARYING(2) SEXUAL_ORIENTATION
+		, NULL::CHARACTER VARYING(2) GENDER_IDENTITY
+		-- convert HISPANIC info from ethnicity_concept_id
+		,CASE WHEN P.ethnicity_concept_id =38003563 THEN 'Y'
+				WHEN P.ethnicity_concept_id =38003564 THEN 'N'
+				WHEN P.ethnicity_concept_id =1310010 THEN 'R'
+				WHEN P.ethnicity_concept_id =1201000 THEN 'UN'
+				WHEN P.ethnicity_concept_id =1501000 THEN 'NI'
+				WHEN P.ethnicity_concept_id =0 THEN 'OT'
+				ELSE 'OT' END::CHARACTER VARYING(2) HISPANIC
+		
+		-- convert RACE info from RACE_CONCEPT_ID
+		,CASE WHEN P.RACE_CONCEPT_ID =8657 THEN '01'
+				WHEN P.RACE_CONCEPT_ID =8515 THEN '02'
+				WHEN P.RACE_CONCEPT_ID =8516 THEN '03'
+				WHEN P.RACE_CONCEPT_ID =8557 THEN '04'
+				WHEN P.RACE_CONCEPT_ID =8527 THEN '05'
+				WHEN P.RACE_CONCEPT_ID =201000 THEN '07'
+				WHEN P.RACE_CONCEPT_ID =501000 THEN 'NI'
+				WHEN P.RACE_CONCEPT_ID =601000 THEN 'UN'
+				ELSE 'OT' END::CHARACTER VARYING(2) RACE
+		
+		,NULL::CHARACTER VARYING(1) BIOBANK_FLAG
+		,C_SEX.CONCEPT_NAME::CHARACTER VARYING(64) RAW_SEX
+		,NULL::CHARACTER VARYING(64) RAW_SEXUAL_ORIENTATION 
+		,NULL::CHARACTER VARYING(64) RAW_GENDER_IDENTITY
+		,C_HIS.CONCEPT_NAME::CHARACTER VARYING(64) RAW_HISPANIC
+		,C_RACE.CONCEPT_NAME::CHARACTER VARYING(64) RAW_RACE
+		
+	FROM RD_OMOP_PROD..PERSON P
+		LEFT JOIN RD_OMOP_PROD..CONCEPT C_SEX
+		ON P.GENDER_CONCEPT_ID  = C_SEX.CONCEPT_ID
+		LEFT JOIN RD_OMOP_PROD..CONCEPT C_HIS
+		ON P.ETHNICITY_CONCEPT_ID  = C_HIS.CONCEPT_ID
+		LEFT JOIN RD_OMOP_PROD..CONCEPT C_RACE
+		ON P.RACE_CONCEPT_ID = C_RACE.CONCEPT_ID
+	
+	--WHERE BIRTH_DATE IS NULL
+	
+--helper sql to know concept ids
+-- NEED to map person _id to patid
+;
 
 -- Person -> Demographic WITH Biobank_flag
 insert into pcornet.demographic (patid, birth_date, birth_time, sex, hispanic, race, biobank_flag, raw_sex, raw_hispanic, raw_race)
