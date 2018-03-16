@@ -1,261 +1,2421 @@
-﻿=======
--- Person -> Demographic WITHOUT Biobank_flag
--- insert into pcornet.demographic (patid, birth_date, birth_time, sex, hispanic, race, biobank_flag, raw_sex, raw_hispanic, raw_race)
-SELECT 
-		PERSON_ID::CHARACTER VARYING(64) PATID
-		,BIRTH_DATETIME::DATE BIRTH_DATE
-		,'00:00'::CHARACTER VARYING(5) BIRTH_TIME
+--update CUT_OFF_DATE of VUMC
+SELECT * FROM CDRN..CUT_OFF_DATE;
+INSERT INTO CUT_OFF_DATE VALUES ('Cycle_4_2','2009-01-01 00:00:00','2018-01-31 00:00:00',CURRENT_DATE);
+
+--update CUT_OFF_DATE of VHAN
+SELECT * FROM CDRN_VHAN..CUT_OFF_DATE;
+INSERT INTO CUT_OFF_DATE VALUES ('Cycle_4_2','2013-12-01 00:00:00','2018-01-31 00:00:00',CURRENT_DATE);
+
+---------############################################################--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##----------OMOP..PROVIDER --> PROVIDER_XWALK-------------##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################--------
+
+TRUNCATE TABLE PROVIDER_XWALK;
+
+INSERT INTO PROVIDER_XWALK 
+SELECT
+	NEXT VALUE FOR CDRN..CDM_PROVIDER_SEQ AS PROVIDERID
+	,PROVIDER_ID  
+	,PROVIDER_SOURCE_VALUE AS VUMC_PROV_ID
+  FROM RD_OMOP_PROD..PROVIDER
+;
+-- 165206
+
+
+
+---------############################################################--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##-map OMOP to CDM for all fields in the ENC_TEMP table--##---------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################--------
+
+-- check depulicates in visit_occurence table
+
+SELECT * FROM RD_OMOP_PROD..VISIT_OCCURRENCE WHERE VISIT_OCCURRENCE_ID IN 
+(select VISIT_OCCURRENCE_ID from RD_OMOP_PROD..VISIT_OCCURRENCE group by VISIT_OCCURRENCE_ID having count(VISIT_OCCURRENCE_ID) > 1 
+)
+ORDER BY VISIT_OCCURRENCE_ID;
+-- generate the encounter_temp for demographic ranking and encounter table construction
+
+TRUNCATE TABLE ENC_TEMP;
+--CREATE TABLE ENC_TEMP AS
+INSERT INTO ENC_TEMP
+SELECT DISTINCT
+	VO.VISIT_OCCURRENCE_ID ::VARCHAR(64) VISIT_OCCURRENCE_ID
+	,P.PERSON_SOURCE_VALUE MRN
+	--,X.PATID::VARCHAR(64) PATID
+	,VISIT_START_DATE::DATE ADMIT_DATE
+	,TO_CHAR(VISIT_START_DATETIME, 'HH24:MI')::VARCHAR(5) ADMIT_TIME 
+	,VISIT_END_DATE::DATE DISCHARGE_DATE
+	,TO_CHAR(VISIT_END_DATETIME, 'HH24:MI')::VARCHAR(5) DISCHARGE_TIME 
 	
+	,PX.PROVIDERID::VARCHAR(64) AS PROVIDERID
+	,SUBSTRING(L.ZIP, 1, 3)::VARCHAR(3) AS FACILITY_LOCATION
+	,CASE WHEN VISIT_CONCEPT_ID = 9203 THEN 'ED'
+		WHEN VISIT_CONCEPT_ID = 9202 THEN 'AV'
+		WHEN VISIT_CONCEPT_ID = 9201 THEN 'IP'
+		WHEN VISIT_CONCEPT_ID = 0 THEN 'NI'
+		ELSE 'OT' END::VARCHAR(2) AS ENC_TYPE 
+		
+	,C.CARE_SITE_SOURCE_VALUE::VARCHAR(64) AS FACILITYID
+	
+	,CASE 
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('G') THEN 'A' --'AM'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('8','7','2','1','I','3','5','6','4') THEN 'E' --'EX', 'DN' = ORGAN DONOR
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('J','69','W','D','62','87','AH') THEN 'OT'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('0') THEN 'UN'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('86','9','E','V','84','L','F','81','S','9','X','12','A','91','13','63','88','CH','95','85','82'
+                  ,'92','11','H','C','N','90','R','94','93','T','Q','K','M','P','89','83','B','10') THEN 'A'
+        ELSE 'NI'
+      END ::VARCHAR(2) AS DISCHARGE_DISPOSITION
+	  
+	,CASE 	
+		WHEN DISCHARGE_TO_SOURCE_VALUE IN ('G') THEN 'AM'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('8','7','2','1','I','3','5','6','4' ) THEN 'EX'-- 'DN' = ORGAN DONOR = ALIVE
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('86','9') THEN 'HH'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('E','V','84','L','F','81','S') THEN 'HO'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('9','X') THEN 'HS'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('12','A','91','13','63','88','CH','95','85','82') THEN 'IP'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('92') THEN 'NF'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('11','H','C','N') THEN 'NH'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('J','69','W','D','62','87','AH') THEN 'OT'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('90','R') THEN 'RH'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('94','93','T','Q') THEN 'RS'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('K','M','P') THEN 'SH'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('89','83','B','10') THEN 'SN'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('0') THEN 'UN'
+		WHEN DISCHARGE_TO_SOURCE_VALUE IN ('DN') THEN 'OT'--YJ: DN TO OT
+        ELSE 'NI' -- NULL TO NI;
+      END ::VARCHAR(2) AS DISCHARGE_STATUS
+	,DRG_CODE::VARCHAR(3) AS DRG
+	,CASE
+		WHEN DRG_CODE IS NOT NULL THEN '02'
+		WHEN DRG_CODE IS NULL THEN NULL 
+		END::VARCHAR(2) AS DRG_TYPE
+	
+	,CASE 
+        WHEN admitting_source_value = 'E' THEN 'AV' --= AMBULATORY VISIT
+        WHEN admitting_source_value = 'J' THEN 'AV' --STUDENT HEALTH IS MAPPED TO AMBULATORY VISIT
+        WHEN admitting_source_value = 'D' THEN 'AV' --TRX BETWEEN PAVILION IS MAPPED TO AMBULAROTY VISIT
+        WHEN admitting_source_value = '2' THEN 'AV' --DOC/CLINIC IS MAPPED TO AMBULATORY VISIT
+        WHEN admitting_source_value = '1' THEN 'HO' --= HOME / SELF CARE
+        WHEN admitting_source_value = 'F' THEN 'HS' --= HOSPICE
+        WHEN admitting_source_value = '4' THEN 'IP' --= OTHER ACUTE INPATIENT HOSPITAL
+        WHEN admitting_source_value = '5' THEN 'NH' --= NURSING HOME (INCLUDES ICF)
+        WHEN admitting_source_value = '' THEN 'RH' --= REHABILITATION FACILITY
+        WHEN admitting_source_value IS NULL THEN 'NI' --= NO INFORMATION
+        WHEN admitting_source_value = '0' THEN 'UN' --= UNKNOWN
+        ELSE 'NI' --= NO INFORMATION 
+	END  AS ADMITTING_SOURCE
+	
+	-- RAW fields
+	,VO.CARE_SITE_ID AS RAW_SITEID
+	,VISIT_CONCEPT_ID AS RAW_ENC_TYPE
+	,DISCHARGE_TO_SOURCE_VALUE AS RAW_DISCHARGE_DISPOSITION
+	,DISCHARGE_TO_SOURCE_VALUE AS RAW_DISCHARGE_STATUS
+	,DRG_CODE AS RAW_DRG_TYPE--YJ: SHOULD BE NULL
+	,admitting_source_value AS RAW_ADMITTING_SOURCE
+	
+	FROM RD_OMOP_PROD..VISIT_OCCURRENCE VO
+		LEFT JOIN RD_OMOP_PROD..PERSON P ON VO.PERSON_ID = P.PERSON_ID
+		JOIN RD_OMOP_PROD..CARE_SITE C ON VO.CARE_SITE_ID = C.CARE_SITE_ID
+		LEFT OUTER JOIN RD_OMOP_PROD..LOCATION L ON C.LOCATION_ID = L.LOCATION_ID
+		
+		LEFT JOIN CDRN_VUMC_DEV..PROVIDER_XWALK PX ON  PX.PROVIDER_ID = VO.PROVIDER_ID 
+	
+		LEFT JOIN RDETL..ENCOUNTER_VISIT_MAPPING ENC_V ON VO.VISIT_OCCURRENCE_ID = ENC_V.VISIT_OCCURRENCE_ID
+		LEFT JOIN CDRN..V_DRG_CODE MIX ON ENC_V.ENC_ID = MIX.ENCOUNTER_NUMBER
+		,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+ WHERE 
+ 	LENGTH(ENC_V.ENC_ID)= 12 
+ 	AND ADMIT_DATE >=   DT.EVT_START_DATE
+ 	AND NVL(DISCHARGE_DATE,DT.EVT_END_DATE)  <=   DT.EVT_END_DATE
+	
+ --DISTRIBUTE ON (MRN)
+ ;
+ --21281623
+ 
+ SELECT COUNT(*) FROM ENC_TEMP WHERE PROVIDERID IS NULL;
+ -- 4279263
+ SELECT COUNT(*) FROM RD_OMOP_PROD..VISIT_OCCURRENCE VO LEFT OUTER JOIN RD_OMOP_PROD..PROVIDER PRV ON  PRV.PROVIDER_ID = VO.PROVIDER_ID WHERE PRV.PROVIDER_ID IS NULL
+
+ ;
+ 
+ -- 9670136
+ 
+
+ 
+ -- 12 digit MP data
+ -- 21,215,963
+ 
+ 
+ ------------------------INSERT FINSUM RECORDS WHERE MP IS NOT THERE (BY LENGTH)----------------------------
+INSERT INTO ENC_TEMP
+SELECT DISTINCT
+	VO.VISIT_OCCURRENCE_ID ::VARCHAR(64) VISIT_OCCURRENCE_ID
+	,P.PERSON_SOURCE_VALUE MRN
+	--,X.PATID::VARCHAR(64) PATID
+	,VISIT_START_DATE::DATE ADMIT_DATE
+	,TO_CHAR(VISIT_START_DATETIME, 'HH24:MI')::VARCHAR(5) ADMIT_TIME 
+	,VISIT_END_DATE::DATE DISCHARGE_DATE
+	,TO_CHAR(VISIT_END_DATETIME, 'HH24:MI')::VARCHAR(5) DISCHARGE_TIME 
+	--,VO.PROVIDER_ID::VARCHAR(64) PROVIDERID
+	,PX.PROVIDERID::VARCHAR(64) AS PROVIDERID
+	,SUBSTRING(L.ZIP, 1, 3)::VARCHAR(3) AS FACILITY_LOCATION
+	,CASE WHEN VISIT_CONCEPT_ID = 9203 THEN 'ED'
+		WHEN VISIT_CONCEPT_ID = 9202 THEN 'AV'
+		WHEN VISIT_CONCEPT_ID = 9201 THEN 'IP'
+		WHEN VISIT_CONCEPT_ID = 0 THEN 'NI'
+		ELSE 'OT' END::VARCHAR(2) AS ENC_TYPE 
+		
+	,C.CARE_SITE_SOURCE_VALUE::VARCHAR(64) AS FACILITYID
+	
+	,CASE 
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('G') THEN 'A' --'AM'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('8','7','2','1','I','3','5','6','4') THEN 'E' --'EX', 'DN' = ORGAN DONOR
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('J','69','W','D','62','87','AH') THEN 'OT'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('0') THEN 'UN'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('86','9','E','V','84','L','F','81','S','9','X','12','A','91','13','63','88','CH','95','85','82'
+                  ,'92','11','H','C','N','90','R','94','93','T','Q','K','M','P','89','83','B','10') THEN 'A'
+        ELSE 'NI'
+      END ::VARCHAR(2) AS DISCHARGE_DISPOSITION
+	  
+	,CASE 	
+		WHEN DISCHARGE_TO_SOURCE_VALUE IN ('G') THEN 'AM'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('8','7','2','1','I','3','5','6','4' ) THEN 'EX'-- 'DN' = ORGAN DONOR = ALIVE
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('86','9') THEN 'HH'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('E','V','84','L','F','81','S') THEN 'HO'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('9','X') THEN 'HS'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('12','A','91','13','63','88','CH','95','85','82') THEN 'IP'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('92') THEN 'NF'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('11','H','C','N') THEN 'NH'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('J','69','W','D','62','87','AH') THEN 'OT'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('90','R') THEN 'RH'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('94','93','T','Q') THEN 'RS'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('K','M','P') THEN 'SH'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('89','83','B','10') THEN 'SN'
+        WHEN DISCHARGE_TO_SOURCE_VALUE IN ('0') THEN 'UN'
+		WHEN DISCHARGE_TO_SOURCE_VALUE IN ('DN') THEN 'OT'--YJ: DN TO OT
+        ELSE 'NI' -- NULL TO NI;
+      END ::VARCHAR(2) AS DISCHARGE_STATUS
+	  
+	,NULL::VARCHAR(3) AS DRG
+	,NULL::VARCHAR(2) AS DRG_TYPE
+	
+	,CASE 
+        WHEN admitting_source_value = 'E' THEN 'AV' --= AMBULATORY VISIT
+        WHEN admitting_source_value = 'J' THEN 'AV' --STUDENT HEALTH IS MAPPED TO AMBULATORY VISIT
+        WHEN admitting_source_value = 'D' THEN 'AV' --TRX BETWEEN PAVILION IS MAPPED TO AMBULAROTY VISIT
+        WHEN admitting_source_value = '2' THEN 'AV' --DOC/CLINIC IS MAPPED TO AMBULATORY VISIT
+        WHEN admitting_source_value = '1' THEN 'HO' --= HOME / SELF CARE
+        WHEN admitting_source_value = 'F' THEN 'HS' --= HOSPICE
+        WHEN admitting_source_value = '4' THEN 'IP' --= OTHER ACUTE INPATIENT HOSPITAL
+        WHEN admitting_source_value = '5' THEN 'NH' --= NURSING HOME (INCLUDES ICF)
+        WHEN admitting_source_value = '' THEN 'RH' --= REHABILITATION FACILITY
+        WHEN admitting_source_value IS NULL THEN 'NI' --= NO INFORMATION
+        WHEN admitting_source_value = '0' THEN 'UN' --= UNKNOWN
+        ELSE 'NI' --= NO INFORMATION 
+	END  AS ADMITTING_SOURCE
+	
+	-- RAW fields
+	,VO.CARE_SITE_ID AS RAW_SITEID
+	,VISIT_CONCEPT_ID AS RAW_ENC_TYPE
+	,DISCHARGE_TO_SOURCE_VALUE AS RAW_DISCHARGE_DISPOSITION
+	,DISCHARGE_TO_SOURCE_VALUE AS RAW_DISCHARGE_STATUS
+	,NULL AS RAW_DRG_TYPE--YJ: SHOULD BE NULL
+	,admitting_source_value AS RAW_ADMITTING_SOURCE
+	
+	FROM RD_OMOP_PROD..VISIT_OCCURRENCE VO
+		LEFT JOIN RD_OMOP_PROD..PERSON P ON VO.PERSON_ID = P.PERSON_ID
+		--LEFT JOIN CDRN_VUMC_DEV..CDM_PATID_MRN_XWALK X ON P.PERSON_SOURCE_VALUE = X.MRN
+		LEFT JOIN RD_OMOP_PROD..CARE_SITE C on VO.CARE_SITE_ID = C.CARE_SITE_ID
+		LEFT OUTER JOIN RD_OMOP_PROD..LOCATION L on C.location_id = L.location_id
+		LEFT JOIN CDRN_VUMC_DEV..PROVIDER_XWALK PX ON  PX.PROVIDER_ID = VO.PROVIDER_ID 
+		LEFT JOIN RDETL..ENCOUNTER_VISIT_MAPPING ENC_V ON VO.VISIT_OCCURRENCE_ID = ENC_V.VISIT_OCCURRENCE_ID
+		
+		,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+ WHERE 
+ 	VO.VISIT_OCCURRENCE_ID IN (SELECT VISIT_OCCURRENCE_ID FROM RDETL..ENCOUNTER_VISIT_MAPPING ENC_V WHERE LENGTH(ENC_V.ENC_ID)= 8) 
+	AND VO.VISIT_OCCURRENCE_ID NOT IN (SELECT VISIT_OCCURRENCE_ID FROM RDETL..ENCOUNTER_VISIT_MAPPING ENC_V WHERE LENGTH(ENC_V.ENC_ID)= 12) 
+ 	AND ADMIT_DATE >= DT.EVT_START_DATE
+ 	AND NVL(DISCHARGE_DATE,DT.EVT_END_DATE) >= ADMIT_DATE
+	;
+-- 10105408
+
+--- CHECKING NUMBERS -----
+
+select count(*) from ENC_TEMP; 						   --31387031
+select count(*) from CDRN_VUMC_PRODUCTION.. ENCOUNTER; --29483889
+
+SELECT * FROM RD_OMOP_PROD..VISIT_OCCURRENCE WHERE VISIT_OCCURRENCE_ID IN (SELECT VISIT_OCCURRENCE_ID FROM RDETL..ENCOUNTER_VISIT_MAPPING ENC_V WHERE ENC_V.ENC_ID='622602887318');
+
+SELECT COUNT(*), CARE_SITE_ID!= 0 VALID_CARE_SITE FROM RD_OMOP_PROD..VISIT_OCCURRENCE WHERE X_MODIFIER = 'ORIGINAL' GROUP BY 2;
+SELECT COUNT(*), CARE_SITE_ID!= 0 VALID_CARE_SITE FROM RD_OMOP_PROD..VISIT_OCCURRENCE WHERE X_MODIFIER = 'MODIFIED' GROUP BY 2;
+
+ ;
+ 
+
+
+ /*
+ SELECT COUNT(*) FROM RD_OMOP_PROD..VISIT_OCCURRENCE VO 
+ 
+ LEFT JOIN RDETL..ENCOUNTER_VISIT_MAPPING ENC_V ON VO.VISIT_OCCURRENCE_ID = ENC_V.VISIT_OCCURRENCE_ID
+ --LEFT JOIN CDRN..V_DRG_CODE MIX ON ENC_V.ENC_ID = MIX.ENCOUNTER_NUMBER
+ ,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+WHERE 
+--LENGTH(ENC_V.ENC_ID)= 12 
+--AND 
+VISIT_START_DATE >= DT.EVT_START_DATE
+AND NVL(VISIT_END_DATE,DT.EVT_END_DATE) >= VISIT_START_DATE
+ ;
+ */
+-- 34062243
+
+---------##################################################################--------
+---------##--------------------------------------------------------------##--------
+---------##--------------------------------------------------------------##--------
+---------##----map OMOP to CDM for all fields in the DEMOGRAPHIC table---##--------
+---------##--------------------------------------------------------------##--------
+---------##--------------------------------------------------------------##--------
+---------##################################################################--------
+
+-- CREATE TABLE DEMO_U AS SELECT * FROM DEMOGRAPHIC LIMIT 0;
+TRUNCATE TABLE DEMO_U;
+
+INSERT INTO DEMO_U
+SELECT DISTINCT
+		--X.PATID::VARCHAR(64) PATID,
+		P.PERSON_SOURCE_VALUE MRN
+		,BIRTH_DATETIME::DATE BIRTH_DATE
+		,'00:00'::VARCHAR(5) BIRTH_TIME
 		-- convert SEX info from GENDER_CONCEPT_ID
-		,CASE WHEN P.GENDER_CONCEPT_ID =901001 THEN 'M'
-				WHEN P.GENDER_CONCEPT_ID =8551 THEN 'UN'
-				WHEN P.GENDER_CONCEPT_ID =0 THEN 'NI'
-				WHEN P.GENDER_CONCEPT_ID =1001001 THEN 'F'
-				WHEN P.GENDER_CONCEPT_ID =8532 THEN 'F'
-				WHEN P.GENDER_CONCEPT_ID =8507 THEN 'M'
-				ELSE 'OT' END :: CHARACTER VARYING(2) SEX
+		,CASE WHEN P.GENDER_CONCEPT_ID =901001 THEN 'M' WHEN P.GENDER_CONCEPT_ID =1001001 THEN 'F' WHEN P.GENDER_CONCEPT_ID =801001 OR P.GENDER_CONCEPT_ID IS NULL THEN 'UN' ELSE 'OT' END :: CHARACTER VARYING(2) SEX
 			
-		, NULL::CHARACTER VARYING(2) SEXUAL_ORIENTATION
-		, NULL::CHARACTER VARYING(2) GENDER_IDENTITY
+		, NULL::VARCHAR(2) SEXUAL_ORIENTATION
+		, CASE WHEN P.X_GENDER_IDENTITY ='Trans Male' THEN 'TM'
+			 WHEN P.X_GENDER_IDENTITY ='Trans Female' THEN 'TF'
+			 WHEN P.X_GENDER_IDENTITY ='Other' THEN 'OT'
+			 WHEN P.X_GENDER_IDENTITY ='NotDisclosed' THEN 'UN'
+			 WHEN P.X_GENDER_IDENTITY ='Male' THEN 'M'
+			 WHEN P.X_GENDER_IDENTITY ='Female' THEN 'F'
+			 ELSE 'UN' END::VARCHAR(2)  GENDER_IDENTITY
+	    --, NULL GENDER_IDENTITY
 		-- convert HISPANIC info from ethnicity_concept_id
-		,CASE WHEN P.ethnicity_concept_id =38003563 THEN 'Y'
-				WHEN P.ethnicity_concept_id =38003564 THEN 'N'
-				WHEN P.ethnicity_concept_id =1310010 THEN 'R'
-				WHEN P.ethnicity_concept_id =1201000 THEN 'UN'
-				WHEN P.ethnicity_concept_id =1501000 THEN 'NI'
-				WHEN P.ethnicity_concept_id =0 THEN 'OT'
-				ELSE 'OT' END::CHARACTER VARYING(2) HISPANIC
+		,CASE WHEN P.ETHNICITY_CONCEPT_ID =1401000 THEN 'Y'
+				WHEN P.ETHNICITY_CONCEPT_ID =1101000 THEN 'N'
+				WHEN P.ETHNICITY_CONCEPT_ID =1310010 THEN 'R'
+				WHEN P.ETHNICITY_CONCEPT_ID =1201000 THEN 'UN'
+				WHEN P.ETHNICITY_CONCEPT_ID =1501000 OR P.ETHNICITY_CONCEPT_ID IS NULL THEN 'NI'
+				ELSE 'OT' END::VARCHAR(2) HISPANIC
 		
 		-- convert RACE info from RACE_CONCEPT_ID
-		,CASE WHEN P.RACE_CONCEPT_ID =8657 THEN '01'
-				WHEN P.RACE_CONCEPT_ID =8515 THEN '02'
-				WHEN P.RACE_CONCEPT_ID =8516 THEN '03'
-				WHEN P.RACE_CONCEPT_ID =8557 THEN '04'
-				WHEN P.RACE_CONCEPT_ID =8527 THEN '05'
+		,CASE WHEN P.RACE_CONCEPT_ID =301000 THEN '01' --
+				WHEN P.RACE_CONCEPT_ID =401000 THEN '02'
+				WHEN P.RACE_CONCEPT_ID =1000 THEN '03'
+				WHEN P.RACE_CONCEPT_ID =101000 THEN '04'
+				WHEN P.RACE_CONCEPT_ID =701000 THEN '05'
 				WHEN P.RACE_CONCEPT_ID =201000 THEN '07'
-				WHEN P.RACE_CONCEPT_ID =501000 THEN 'NI'
+				WHEN P.RACE_CONCEPT_ID =501000 OR P.RACE_CONCEPT_ID IS NULL THEN 'NI'
 				WHEN P.RACE_CONCEPT_ID =601000 THEN 'UN'
-				ELSE 'OT' END::CHARACTER VARYING(2) RACE
+				ELSE 'OT' END::VARCHAR(2) RACE
 		
-		,NULL::CHARACTER VARYING(1) BIOBANK_FLAG
-		,C_SEX.CONCEPT_NAME::CHARACTER VARYING(64) RAW_SEX
-		,NULL::CHARACTER VARYING(64) RAW_SEXUAL_ORIENTATION 
-		,NULL::CHARACTER VARYING(64) RAW_GENDER_IDENTITY
-		,C_HIS.CONCEPT_NAME::CHARACTER VARYING(64) RAW_HISPANIC
-		,C_RACE.CONCEPT_NAME::CHARACTER VARYING(64) RAW_RACE
+		,NULL::VARCHAR(1) BIOBANK_FLAG
+		,C_SEX.CONCEPT_NAME::VARCHAR(64) RAW_SEX
+		,NULL::VARCHAR(64) RAW_SEXUAL_ORIENTATION 
+		,P.X_GENDER_IDENTITY AS RAW_GENDER_IDENTITY
+		--, NULL  AS RAW_GENDER_IDENTITY
+		,C_HIS.CONCEPT_NAME::VARCHAR(64) RAW_HISPANIC
+		,C_RACE.CONCEPT_NAME::VARCHAR(64) RAW_RACE
 		
 	FROM RD_OMOP_PROD..PERSON P
-		LEFT JOIN RD_OMOP_PROD..CONCEPT C_SEX
-		ON P.GENDER_CONCEPT_ID  = C_SEX.CONCEPT_ID
-		LEFT JOIN RD_OMOP_PROD..CONCEPT C_HIS
-		ON P.ETHNICITY_CONCEPT_ID  = C_HIS.CONCEPT_ID
-		LEFT JOIN RD_OMOP_PROD..CONCEPT C_RACE
-		ON P.RACE_CONCEPT_ID = C_RACE.CONCEPT_ID
+		LEFT JOIN RD_OMOP_PROD..CONCEPT C_SEX ON P.GENDER_CONCEPT_ID  = C_SEX.CONCEPT_ID
+		LEFT JOIN RD_OMOP_PROD..CONCEPT C_HIS ON P.ETHNICITY_CONCEPT_ID  = C_HIS.CONCEPT_ID
+		LEFT JOIN RD_OMOP_PROD..CONCEPT C_RACE ON P.RACE_CONCEPT_ID = C_RACE.CONCEPT_ID
+		JOIN CDRN_VUMC_PRODUCTION..CDM_PATID_MRN_XWALK X ON P.PERSON_SOURCE_VALUE = X.MRN
 	
-	--WHERE BIRTH_DATE IS NULL
+	WHERE BIRTH_DATE BETWEEN '1901-01-01' AND  (SELECT EVT_END_DATE FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') 
 	
---helper sql to know concept ids
--- NEED to map person _id to patid
+	;
+
+-- 1795478
+
+
+SELECT COUNT(*) FROM RD_OMOP_PROD..PERSON P JOIN CDRN_VUMC_PRODUCTION..CDM_PATID_MRN_XWALK X ON P.PERSON_SOURCE_VALUE = X.MRN
+;
+--1795491
+
+SELECT COUNT(DISTINCT PATID) FROM CDRN_VUMC_PRODUCTION..CDM_PATID_MRN_XWALK; --1777131
+
+SELECT DISTINCT LENGTH(PERSON_SOURCE_VALUE) FROM RD_OMOP_PROD..PERSON P
+
+
+-----------------##############################---------------------
+---------------- # START GID FROM GID FILE ---#---------------------
+-----------------##############################---------------------
+
+-- ENCOUNTER_XWALK_OMOP
+TRUNCATE TABLE ENCOUNTER_XWALK;
+INSERT INTO ENCOUNTER_XWALK  -- assign new enc_id to deid
+SELECT 
+	NEXT VALUE FOR CDRN..CDM_ENCOUNTER_SEQ AS ENCOUNTERID
+	,VISIT_OCCURRENCE_ID
+FROM
+	(
+		SELECT DISTINCT
+			VISIT_OCCURRENCE_ID
+		FROM
+			ENC_TEMP
+	)X
+--DISTRIBUTE ON (VISIT_OCCURRENCE_ID)
+;
+--  31387031
+
+select distinct GENDER_IDENTITY from DEMO_U;
+
+TRUNCATE TABLE DEMO_U_RANK;
+
+INSERT INTO DEMO_U_RANK
+SELECT DISTINCT
+	T.GID PATID, U.*	
+	,RANK() OVER (PARTITION BY T.GID ORDER BY DECODE(HISPANIC, 'Y', 1, 'N', 1, 'R', 2, 'NI', 3, 'UN', 4, 'OT', 5)
+							,E.MAX_ENC_DATE DESC ) RANK_HISPANIC
+ 	,RANK() OVER (PARTITION BY T.GID ORDER BY DECODE(RACE, '01', 1, '02', 1, '03',1, '04', 1,'05', 1,'06', 1, '07', 1,'NI', 2, 'OT', 4, 'UN', 3)
+					,E.MAX_ENC_DATE DESC ) RANK_RACE
+  	,RANK() OVER (PARTITION BY T.GID ORDER BY DECODE(SEX,'A', 2, 'F', 1, 'M', 1, 'UN', 3, 'NI', 4, 'OT', 5)
+					 ,E.MAX_ENC_DATE DESC ) RANK_SEX
+	,RANK() OVER (PARTITION BY T.GID ORDER BY DECODE(GENDER_IDENTITY,'TM', 1, 'TF', 1, 'F', 2, 'M', 2, 'UN', 4, 'OT', 3)
+					 ,E.MAX_ENC_DATE DESC ) RANK_GENDER_IDENTITY
+	,RANK() OVER (PARTITION BY T.GID ORDER BY CASE WHEN BIRTH_DATE IS NULL 
+													OR BIRTH_DATE IN ('1901-01-01 00:00:00','1900-01-01 00:00:00','1849-01-01 00:00:00','1800-01-01 00:00:00') THEN 1 ELSE 0 END 
+	 			,E.MAX_ENC_DATE DESC ) RANK_DOB
+FROM 
+	DEMO_U U
+	JOIN CDRN..CDRN_MAPPING_GID AS T  -- UPDATE TO NEW ONE
+		ON T.MRN = U.MRN
+	JOIN (SELECT MRN, MAX((TO_CHAR(ADMIT_DATE, 'YYYY-MM-DD')||' '||ADMIT_TIME)::TIMESTAMP) MAX_ENC_DATE FROM ENC_TEMP GROUP BY 1) E
+	    ON U.MRN = E.MRN
+
+;
+-- 1795369
+
+
+SELECT PATID FROM
+(SELECT *, ROW_NUMBER() OVER (PARTITION BY PATID ORDER BY PATID) as RowNum
+	FROM DEMO_U_RANK
+) 
+AS B WHERE RowNum > 1
+;	
+
+TRUNCATE TABLE DEMO_DEDUP;
+
+INSERT INTO DEMO_DEDUP
+SELECT DISTINCT ETH.PATID
+	, DOB.BIRTH_DATE
+	, DOB.BIRTH_TIME 
+	, SEX.SEX
+	, SEX.SEXUAL_ORIENTATION
+	, GDI.GENDER_IDENTITY
+	, ETH.HISPANIC
+	, RACE.RACE
+	, RACE.BIOBANK_FLAG
+	, SEX.RAW_SEX
+	, SEX.RAW_SEXUAL_ORIENTATION
+	, GDI.RAW_GENDER_IDENTITY
+	, ETH.RAW_HISPANIC
+	, RACE.RAW_RACE
+FROM 
+    DEMO_U_RANK T
+	JOIN DEMO_U_RANK ETH ON T.PATID = ETH.PATID AND ETH.RANK_HISPANIC = 1
+	JOIN DEMO_U_RANK RACE ON T.PATID = RACE.PATID AND RACE.RANK_RACE = 1
+	JOIN DEMO_U_RANK SEX ON T.PATID = SEX.PATID AND SEX.RANK_SEX = 1
+	JOIN DEMO_U_RANK DOB ON T.PATID = DOB.PATID AND DOB.RANK_DOB = 1
+	JOIN DEMO_U_RANK GDI ON T.PATID = GDI.PATID AND GDI.RANK_DOB = 1
+
+	;
+--  1777024
+
+
+-- check whether any dups in the demo_dedup
+
+SELECT DISTINCT * FROM DEMO_DEDUP WHERE PATID IN 
+(SELECT PATID FROM DEMO_DEDUP GROUP BY PATID HAVING COUNT(PATID) > 1 
+) ORDER BY PATID;
+---
+-- REMOVE the wrong info for this specfic patid
+DELETE FROM DEMO_DEDUP
+WHERE PATID = 1948438 AND BIRTH_DATE = '2013-01-06 00:00:00'; 
+--1
+
+TRUNCATE TABLE DEMOGRAPHIC;
+INSERT INTO DEMOGRAPHIC 
+	SELECT DISTINCT * FROM DEMO_DEDUP
+	;
+
+-- 1777023
+
+
+
+--------------------------------------------------------------------------------
+---------############################################################-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------##------------- UPDATE CDM_PATID_MRN_XWALK ---------------##-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------############################################################-----------
+--------------------------------------------------------------------------------
+
+SELECT COUNT(*) FROM CDM_PATID_MRN_XWALK; --1795552
+TRUNCATE CDM_PATID_MRN_XWALK;
+INSERT INTO CDM_PATID_MRN_XWALK
+SELECT DISTINCT
+	V.GID AS PATID
+	,V.MRN
+	,3.13 AS CDM_VERSION  --SX: SHOULD BE 3.13 THIS TIME 
+	,DATE(CURRENT_TIMESTAMP) AS LOAD_DATE
+FROM
+	CDRN..CDRN_MAPPING_GID V 
+	JOIN DEMOGRAPHIC D
+		ON V.GID = D.PATID
+	JOIN DEMO_U U  --SX: LIMIT TO VUMC MRN ONLY
+	    ON V.MRN = U.MRN
+; 
+-- 1795552
+---------############################################################-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------##----------ENC_TEMP to ENC_U  in the ENCOUNTER table-----##-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------############################################################-----------
+
+SELECT * FROM ENC_TEMP;
+
+--CREATE TABLE ENC_TEMP2 AS SELECT * FROM ENCOUNTER LIMIT 0;
+TRUNCATE TABLE ENC_TEMP2;
+INSERT INTO ENC_TEMP2 
+SELECT 
+
+ENC_X.ENCOUNTERID
+	,X.PATID
+	,ADMIT_DATE
+	,ADMIT_TIME
+	,DISCHARGE_DATE
+	,DISCHARGE_TIME
+	,PROVIDERID
+	,FACILITY_LOCATION
+	,ENC_TYPE
+	,FACILITYID
+	,DISCHARGE_DISPOSITION
+	,DISCHARGE_STATUS
+	,DRG
+	,DRG_TYPE
+	,ADMITTING_SOURCE
+	,RAW_SITEID
+	,RAW_ENC_TYPE
+	,RAW_DISCHARGE_DISPOSITION
+	,RAW_DISCHARGE_STATUS
+	,RAW_DRG_TYPE
+	,RAW_ADMITTING_SOURCE
+FROM ENC_TEMP ENC 
+JOIN CDM_PATID_MRN_XWALK X ON ENC.MRN = X.MRN 
+JOIN ENCOUNTER_XWALK ENC_X ON ENC_X.VISIT_OCCURRENCE_ID = ENC.VISIT_OCCURRENCE_ID
+;
+-- 31057853
+SELECT COUNT(*) FROM ENC_TEMP;
+-- 31387031
+SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..ENCOUNTER;
+-- 29483889
+
+
+--------------------------------------------------------------------------------
+---------############################################################-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------##---map OMOP to CDM for all fields in the DEATH table----##-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------############################################################-----------
+
+-- CREATE TABLE DEATH_U AS SELECT * FROM DEATH LIMIT 0;
+TRUNCATE TABLE DEATH_U;
+INSERT INTO DEATH_U
+(SELECT 
+	DISTINCT 
+	X.PATID
+	--,CASE WHEN X_DOD_FLAG = 'ORIGINAL' THEN DEATH_DATE ELSE NULL END::DATE AS DEATH_DATE
+	, DEATH_DATE
+	-- ,X_FNAME, X_LNAME
+	,'N'::VARCHAR(2) DEATH_DATE_IMPUTE
+	,'L'::VARCHAR(2) DEATH_SOURCE
+	,'E'::VARCHAR(2) DEATH_MATCH_CONFIDENCE
+FROM RD_OMOP_PROD..DEATH D 
+		JOIN RD_OMOP_PROD..PERSON P ON D.PERSON_ID = P.PERSON_ID
+		JOIN CDM_PATID_MRN_XWALK X ON P.PERSON_SOURCE_VALUE = X.MRN
+		JOIN DEMOGRAPHIC DEMO ON X.PATID = DEMO.PATID,
+    (SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+WHERE DEATH_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE OR DEATH_DATE IS NULL
+	)
 ;
 
--- Person -> Demographic WITH Biobank_flag
-insert into pcornet.demographic (patid, birth_date, birth_time, sex, hispanic, race, biobank_flag, raw_sex, raw_hispanic, raw_race)
-select distinct 
-	cast(p.person_id as text) as pat_id,
-	cast(year_of_birth as text)||(case when month_of_birth is null OR day_of_birth is null then '' else '-'||lpad(cast(month_of_birth as text),2,'0')||'-'||lpad(cast(day_of_birth as text),2,'0') end) as birth_date,	
-	null as birth_time,
-	coalesce (m1.target_concept,'OT') as Sex,
-	coalesce (m2.target_concept,'OT') as Hispanic,
-	coalesce (m3.target_concept,'OT') as Race,
-	coalesce (m4.target_concept,'OT') as Biobank_flag,
-	gender_source_value,
-	ethnicity_source_value,
-	race_source_value
-from
-	omop.person p
-	left join omop.observation o on p.person_id = o.person_id and observation_concept_id = 4001345
-	left join cz.cz_omop_pcornet_concept_map m1 on case when p.gender_concept_id is null AND m1.source_concept_id is null then true else p.gender_concept_id = m1.source_concept_id end and m1.source_concept_class='Gender'
-	left join cz.cz_omop_pcornet_concept_map m2 on case when p.ethnicity_concept_id is null AND m2.source_concept_id is null then true else p.ethnicity_concept_id = m2.source_concept_id end and m2.source_concept_class='Hispanic'
-	left join cz.cz_omop_pcornet_concept_map m3 on case when p.race_concept_id is null AND m3.source_concept_id is null then true else p.race_concept_id = m3.source_concept_id end and m3.source_concept_class = 'Race'
-	left join cz.cz_omop_pcornet_concept_map m4 on case when o.value_as_concept_id is null AND m4.value_as_concept_id is null then true else o.value_as_concept_id=m4.value_as_concept_id end and m4.source_concept_class = 'Biobank flag'
+SELECT COUNT(*) FROM RD_OMOP_PROD..DEATH D 
+		JOIN RD_OMOP_PROD..PERSON P ON D.PERSON_ID = P.PERSON_ID
+		JOIN CDRN_VUMC_DEV..CDM_PATID_MRN_XWALK X ON P.PERSON_SOURCE_VALUE = X.MRN
+		JOIN CDRN_VUMC_DEV..DEMOGRAPHIC DEMO ON X.PATID = DEMO.PATID
+;	
 
--- Observation_period -> Enrollment
-insert into pcornet.enrollment (patid, enr_start_date, enr_end_date, chart, enr_basis)
-select distinct 
-	cast(op.person_id as text) as pat_id,
-	cast(date_part('year', observation_period_start_date) as text)||'-'||lpad(cast(date_part('month', observation_period_start_date) as text),2,'0')||'-'||lpad(cast(date_part('day', observation_period_start_date) as text),2,'0') as enr_start_date,
-	cast(date_part('year', observation_period_end_date) as text)||'-'||lpad(cast(date_part('month', observation_period_end_date) as text),2,'0')||'-'||lpad(cast(date_part('day', observation_period_end_date) as text),2,'0') as enr_end_date,
-	coalesce(m1.target_concept,'OT') as chart_avaiability,
-	'E' as ENR_basis
-from
-	omop.observation_period op
-	left join omop.observation o on op.person_id = o.person_id and observation_concept_id = 4030450
-	left join cz.cz_omop_pcornet_concept_map m1 on case when o.value_as_concept_id is null AND m1.value_as_concept_id is null then true else o.value_as_concept_id = m1.value_as_concept_id end and m1.source_concept_class = 'Chart availability'
+-- 40931
+-- 15006
+SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..DEATH; --39647
+SELECT COUNT(*) FROM RD_OMOP_PROD..DEATH; --24002
+--CREATE TABLE DEATH_OMOP AS SELECT * FROM DEATH LIMIT 0;
 
--- Visit occurrence -> encounter
-insert into pcornet.encounter (
-            patid, encounterid, admit_date, admit_time, discharge_date, discharge_time, 
-            providerid, facility_location, enc_type, facilityid, discharge_disposition, 
-            discharge_status, drg, drg_type, admitting_source, raw_enc_type, 
-            raw_discharge_disposition, raw_discharge_status, raw_drg_type, 
-            raw_admitting_source)
-select distinct 
-	cast(v.person_id as text) as pat_id,
-	cast(v.visit_occurrence_id as text) as encounterid,
-	cast(date_part('year', visit_start_date) as text)||'-'||lpad(cast(date_part('month', visit_start_date) as text),2,'0')||'-'||lpad(cast(date_part('day', visit_start_date) as text),2,'0') as admit_date,
-	null as admit_time,
-	cast(date_part('year', visit_end_date) as text)||'-'||lpad(cast(date_part('month', visit_end_date) as text),2,'0')||'-'||lpad(cast(date_part('day', visit_end_date) as text),2,'0') as discharge_date,
-	null as discharge_time,
-	null as providerid,
-	left(l.zip,3) as facility_location,
-	coalesce(m1.target_concept,'OT') as enc_type,
-	v.care_site_id as facilityid,
-	coalesce(m2.target_concept,'OT') as discharge_disposition,
-	coalesce(m3.target_concept,'OT') as discharge_status,
-	--case when coalesce(m1.target_concept,'OT') in ('AV','OA') then null else case when o2.observation_source_value~'^[0-9]{0,3}$' then lpad(o2.observation_source_value,3,'0') else 'OT' end end as drg,
-	--case when coalesce(m1.target_concept,'OT') in ('AV','OA') then null else case when visit_start_date<'2007-10-01' then '01' else '02' end end as drg_type,
-	--case when drg.concept_id is null then 'OT' else drg.concept_code end as drg,
-	case when coalesce(m1.target_concept,'OT') in ('AV','OA') then null else o2.concept_code end as drg,
-	case when coalesce(m1.target_concept,'OT') in ('AV','OA') then null else case when visit_start_date<'2007-10-01' then '01' else '02' end end as drg_type,
-	coalesce(m4.target_concept,'OT') as admitting_source,
-	v.place_of_service_concept_id as raw_enc_type,
-	o1.value_as_concept_id as raw_discharge_disposition,
-	o3.value_as_concept_id as raw_discharge_status,
-	null as raw_drg_type,
-	o4.value_as_concept_id as raw_admitting_source
-from
-	omop.visit_occurrence v
-	--left join omop.person p on v.person_id = p.person_id
-	left join omop.care_site c on v.care_site_id = c.care_site_id
-	left join omop.location l on c.location_id = l.location_id
-	left join omop.observation o1 on v.person_id = o1.person_id and o1.observation_concept_id = 44813951
-	left join omop.observation o2 on v.person_id = o2.person_id and o2.observation_concept_id = 3040464
-	--left join omop.observation drg on drg.concept_id = o2.value_as_concept_id
-	left join omop.observation o3 on v.person_id = o3.person_id and o3.observation_concept_id = 4137274
-	left join omop.observation o4 on v.person_id = o4.person_id and o4.observation_concept_id = 4145666
-	left join cz.cz_omop_pcornet_concept_map m1 on case when v.place_of_service_concept_id is null AND m1.source_concept_id is null then true else v.place_of_service_concept_id = m1.source_concept_id end and m1.source_concept_class='Encounter type'
-	left join cz.cz_omop_pcornet_concept_map m2 on case when o1.value_as_concept_id is null AND m2.value_as_concept_id is null then true else o1.value_as_concept_id = m2.value_as_concept_id end and m2.source_concept_class='Discharge disposition'
-	left join cz.cz_omop_pcornet_concept_map m3 on case when o3.value_as_concept_id is null AND m3.value_as_concept_id is null then true else o3.value_as_concept_id = m3.value_as_concept_id end and m3.source_concept_class='Discharge status'
-	left join cz.cz_omop_pcornet_concept_map m4 on case when o4.value_as_concept_id is null AND m4.value_as_concept_id is null then true else o4.value_as_concept_id = m4.value_as_concept_id end and m4.source_concept_class='Admitting source'
+TRUNCATE TABLE DEATH;
+INSERT INTO DEATH
+SELECT 
+	DISTINCT 
+	PATID, DEATH_DATE, DEATH_DATE_IMPUTE, DEATH_SOURCE, DEATH_MATCH_CONFIDENCE
+FROM 
 
--- condition_occurrence --> Diagnosis
-insert into pcornet.diagnosis(
-            patid, encounterid, enc_type, admit_date, providerid, dx, dx_type, 
-            dx_source, pdx, raw_dx, raw_dx_type, raw_dx_source, raw_pdx)
-select distinct 
-	cast(person_id as text) as patid,
-	cast(visit_occurrence_id as text) encounterid,
-	enc.enc_type,
-	enc.admit_date,
-	enc.providerid,
-	condition_concept_id as dx,
-	'SM' as dx_type,
-	null as dx_source,
-	null as pdx,
-	null as raw_dx,
-	null as raw_dx_type,
-	null as raw_dx_source,
-	null as raw_pdx
-from
-	omop.condition_occurrence co
-	join pcornet.encounter enc on cast(co.visit_occurrence_id as text)=enc.encounterid; 
+(SELECT RANK() OVER (PARTITION BY PATID ORDER BY DEATH_DATE) RANK_DOD
+, *
+FROM 
+DEATH_U) DEATH_U_RANK
+WHERE RANK_DOD =1
+; -- 39993
 
--- procedure_occurrence -> procedure
-insert into pcornet.procedure(
-            patid, encounterid, enc_type, admit_date, providerid, px, px_type, 
-            raw_px, raw_px_type)
-select distinct 
-	cast(person_id as text) as patid,
-	cast(visit_occurrence_id as text) as encounterid,
-	enc.enc_type,
-	enc.admit_date,
-	enc.providerid,
-	procedure_concept_id as px,
-	'SM' as px_type,
-	null as raw_px,
-	null as raw_px_type
-from
-	omop.procedure_occurrence po
-	join pcornet.encounter enc on cast(po.visit_occurrence_id as text)=enc.encounterid;
+SELECT COUNT(DISTINCT PATID) FROM CDRN_VUMC_PRODUCTION..DEATH;
+-- 39647
+SELECT COUNT(DISTINCT PATID) FROM DEATH;
+-- 39993
 
--- observation --> vital WITHOUT Observation time
-insert into pcornet.vital(
-            patid, encounterid, measure_date, measure_time, vital_source, 
-            ht, wt, diastolic, systolic, original_bmi, bp_position, raw_vital_source, 
-            raw_diastolic, raw_systolic, raw_bp_position)
-select distinct 
-	cast(ob.person_id as text) as patid,
-	cast(ob.visit_occurrence_id as text) as encounterid,
-	cast(date_part('year', ob.observation_date) as text)||'-'||lpad(cast(date_part('month', ob.observation_date) as text),2,'0')||'-'||lpad(cast(date_part('day', ob.observation_date) as text),2,'0') as measure_date,
-	lpad(cast(date_part('hour', ob.observation_time) as text),2,'0')||':'||lpad(cast(date_part('minute', ob.observation_time) as text),2,'0') as measure_time,
-	null as vital_source,
-	ob_ht.value_as_number as ht,
-	ob_wt.value_as_number as wt,
-	ob_dia.value_as_number as diastolic,
-	ob_sys.value_as_number as systolic,
-	ob_bmi.value_as_number as original_bmi,
-	coalesce(ob_bp.target_concept,'OT') as bp_position,
-	null as raw_vital_source,
-	null as raw_diastolic,
-	null as raw_systolic,
-	null as raw_bp_position
-from
-	omop.observation ob 
-	left join omop.observation ob_ht on ob.visit_occurrence_id = ob_ht.visit_occurrence_id 
-		and ob.observation_date = ob_ht.observation_date and ob_ht.observation_concept_id='3023540'
-	left join omop.observation ob_wt on ob.visit_occurrence_id = ob_wt.visit_occurrence_id 
-		and ob.observation_date = ob_wt.observation_date and ob_wt.observation_concept_id='3013762'
-	left join omop.observation ob_sys on ob.visit_occurrence_id = ob_sys.visit_occurrence_id 
-		and ob.observation_date = ob_sys.observation_date and ob_sys.observation_concept_id IN ('3018586','3035856','3009395','3004249')
-	left join omop.observation ob_dia on ob.visit_occurrence_id = ob_dia.visit_occurrence_id 
-		and ob_sys.value_as_concept_id = ob_dia.value_as_concept_id and ob_dia.observation_concept_id IN ('3034703','3019962','3013940','3012888') 
-	left join omop.observation ob_bmi on ob.visit_occurrence_id = ob_bmi.visit_occurrence_id 
-		and ob.observation_date = ob_bmi.observation_date and ob_bmi.observation_concept_id='3038553'
-	left join 
-	(select distinct visit_occurrence_id, observation_date, observation_time, target_concept, ob_sub.value_as_string from 
-	omop.observation ob_sub inner join cz.cz_omop_pcornet_concept_map m on ob_sub.observation_concept_id = m.source_concept_id AND m.source_concept_class='BP Position') ob_bp
-	on ob.visit_occurrence_id = ob_bp.visit_occurrence_id AND trim(both ' ' from ob_bp.value_as_string) = trim(both ' ' from ob_sys.value_as_string)	
-	where ob.observation_concept_id IN ('3023540','3013762','3034703','3019962','3013940','3012888','3018586','3035856','3009395','3004249','3038553')
-	AND coalesce(ob_ht.value_as_number, ob_wt.value_as_number, ob_dia.value_as_number, 
-	ob_sys.value_as_number, ob_bmi.value_as_number) is not null;
+--------------------------------------------------------------------------------
+---------############################################################-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------##--CLEAN UP ENC_TEMP2 ACCORDING TO DEATH AND DEMO TABLES-##-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------############################################################-----------
 
--- observation --> vital WITH Observation time
-insert into pcornet.vital(
-            patid, encounterid, measure_date, measure_time, vital_source, 
-            ht, wt, diastolic, systolic, original_bmi, bp_position, raw_vital_source, 
-            raw_diastolic, raw_systolic, raw_bp_position)
-select distinct 
-	cast(ob.person_id as text) as patid,
-	cast(ob.visit_occurrence_id as text) as encounterid,
-	cast(date_part('year', ob.observation_date) as text)||'-'||lpad(cast(date_part('month', ob.observation_date) as text),2,'0')||'-'||lpad(cast(date_part('day', ob.observation_date) as text),2,'0') as measure_date,
-	lpad(cast(date_part('hour', ob.observation_time) as text),2,'0')||':'||lpad(cast(date_part('minute', ob.observation_time) as text),2,'0') as measure_time,
-	null as vital_source,
-	ob_ht.value_as_number as ht,
-	ob_wt.value_as_number as wt,
-	ob_dia.value_as_number as diastolic,
-	ob_sys.value_as_number as systolic,
-	ob_bmi.value_as_number as original_bmi,
-	coalesce(ob_bp.target_concept,'OT') as bp_position,
-	null as raw_vital_source,
-	null as raw_diastolic,
-	null as raw_systolic,
-	null as raw_bp_position
-from
-	omop.observation ob 
-	left join omop.observation ob_ht on ob.visit_occurrence_id = ob_ht.visit_occurrence_id 
-		and ob.observation_date = ob_ht.observation_date and ob.observation_time = ob_ht.observation_time and ob_ht.observation_concept_id='3023540'
-	left join omop.observation ob_wt on ob.visit_occurrence_id = ob_wt.visit_occurrence_id 
-		and ob.observation_date = ob_wt.observation_date and ob.observation_time = ob_wt.observation_time and ob_wt.observation_concept_id='3013762'
-	left join omop.observation ob_sys on ob.visit_occurrence_id = ob_sys.visit_occurrence_id 
-		and ob.observation_date = ob_sys.observation_date and ob.observation_time = ob_sys.observation_time and ob_sys.observation_concept_id IN ('3018586','3035856','3009395','3004249')
-	left join omop.observation ob_dia on ob.visit_occurrence_id = ob_dia.visit_occurrence_id 
-		and ob_sys.value_as_concept_id = ob_dia.value_as_concept_id and ob_dia.observation_concept_id IN ('3034703','3019962','3013940','3012888') 
-	left join omop.observation ob_bmi on ob.visit_occurrence_id = ob_bmi.visit_occurrence_id 
-		and ob.observation_date = ob_bmi.observation_date and ob.observation_time = ob_bmi.observation_time and ob_bmi.observation_concept_id='3038553'
-	left join 
-	(select distinct visit_occurrence_id, observation_date, observation_time, target_concept from 
-	omop.observation ob_sub inner join cz.cz_omop_pcornet_concept_map m on ob_sub.observation_concept_id = m.source_concept_id AND m.source_concept_class='BP Position') ob_bp
-	on ob.visit_occurrence_id = ob_bp.visit_occurrence_id AND trim(both ' ' from ob_bp.value_as_string) = trim(both ' ' from ob_sys.value_as_string)
-	where ob.observation_concept_id IN ('3023540','3013762','3034703','3019962','3013940','3012888','3018586','3035856','3009395','3004249','3038553')
-	AND coalesce(ob_ht.value_as_number, ob_wt.value_as_number, ob_dia.value_as_number, 
-	ob_sys.value_as_number, ob_bmi.value_as_number) is not null;
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..ENCOUNTER;  --29483889
+
+TRUNCATE TABLE ENCOUNTER;
+INSERT INTO ENCOUNTER
+	(SELECT 
+		ENCOUNTERID
+		,ET.PATID
+		,ADMIT_DATE
+		,ADMIT_TIME
+		,CASE WHEN DISCHARGE_DATE > DT.EVT_END_DATE THEN NULL ELSE DISCHARGE_DATE END AS DISCHARGE_DATE 
+		,CASE WHEN DISCHARGE_DATE > DT.EVT_END_DATE THEN NULL ELSE DISCHARGE_TIME END AS DISCHARGE_TIME 
+		,PROVIDERID
+		,FACILITY_LOCATION
+		,ENC_TYPE
+		,FACILITYID
+		,DISCHARGE_DISPOSITION
+		,DISCHARGE_STATUS
+		,DRG
+		,DRG_TYPE
+		,ADMITTING_SOURCE
+		,RAW_SITEID
+		,RAW_ENC_TYPE
+		,RAW_DISCHARGE_DISPOSITION
+		,RAW_DISCHARGE_STATUS
+		,RAW_DRG_TYPE
+		,RAW_ADMITTING_SOURCE
+	FROM
+		ENC_TEMP2 AS ET
+	    LEFT JOIN CDRN_VUMC_DEV..DEATH DE ON ET.PATID = DE.PATID
+		LEFT JOIN  CDRN_VUMC_DEV..DEMOGRAPHIC D ON ET.PATID = D.PATID
+		,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+	WHERE  
+		ADMIT_DATE BETWEEN NVL(D.BIRTH_DATE,'1900-01-01') AND NVL(DE.DEATH_DATE,CURRENT_DATE)
+		AND NVL(DISCHARGE_DATE,DT.EVT_END_DATE) >= ADMIT_DATE
+	)
+; 
+-- 31034079
+
+---- CHECKING THE MAPPING --------
+SELECT COUNT(*) FROM ENCOUNTER; --31,034,079
+SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..ENCOUNTER; --29,483,889
+---------------------------------------------------------------------------
+
+SELECT COUNT(*) FROM RD_OMOP_PROD..VISIT_OCCURRENCE ET
+	LEFT JOIN RD_OMOP_PROD..PERSON P ON P.PERSON_ID = ET.PERSON_ID
+	LEFT JOIN CDRN..CDRN_MAPPING_GID V ON V.MRN = P.PERSON_SOURCE_VALUE 
+    LEFT JOIN DEATH DE ON V.GID = DE.PATID
+	,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+WHERE 
+ VISIT_START_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE
+ AND NVL(VISIT_END_DATE, DT.EVT_END_DATE ) >= VISIT_START_DATE
+
+; --32,636,489
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+---------############################################################-----------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##--GENERATE ENOLLMENT TABLE ACCORDING TO ENCOUNTER TABLE-##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################-----------
+
+SELECT COUNT(*) FROM ENROLLMENT; --1,749,580
+TRUNCATE TABLE ENROLLMENT;
+INSERT INTO ENROLLMENT 
+SELECT DISTINCT 
+	E.PATID, 
+	MIN(DATE_TRUNC('day', E.ADMIT_DATE)) AS ENR_START_DATE,
+	MAX(DATE_TRUNC('day', NVL(E.DISCHARGE_DATE, E.ADMIT_DATE))) AS ENR_END_DATE,
+	'Y' AS CHART,
+	'E' AS ENR_BASIS
+FROM 
+	CDRN_VUMC_DEV..ENCOUNTER E
+GROUP BY 1; --  1776975
+
+	
+---------############################################################-----------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##- ---MAP CONDITION_OCCURRENCE TABLE TO DIAGNOSIS--------##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################-----------
+TRUNCATE TABLE DIAG_OMOP_U;
+INSERT INTO DIAG_OMOP_U  
+	(SELECT 
+		DISTINCT
+		ENC.PATID
+		,ENC.ENCOUNTERID
+		,ENC.ENC_TYPE
+		,ENC.ADMIT_DATE
+		,ENC.PROVIDERID
+		,C.CONCEPT_CODE AS DX
+		,CASE WHEN C.VOCABULARY_ID = 'ICD10CM' THEN '10'
+			WHEN C.VOCABULARY_ID = 'ICD9CM' THEN '09'
+			WHEN C.VOCABULARY_ID = 'SNOMED' THEN 'SM'
+			ELSE 'NI' END AS DX_TYPE
+		,CONDITION_STATUS_SOURCE_VALUE AS DX_SOURCE
+		,'BI' AS DX_ORIGIN
+		,CASE 
+			WHEN ENC.ENC_TYPE IN ('IP', 'IS', 'EI')THEN CASE
+					WHEN CONDITION_TYPE_CONCEPT_ID = 38000230 THEN 'P'
+					WHEN CONDITION_TYPE_CONCEPT_ID = 0 OR CONDITION_TYPE_CONCEPT_ID IS NULL THEN 'NI'
+					ELSE 'S'
+					END
+			WHEN ENC.ENC_TYPE IN ('ED', 'AV', 'OA')THEN 'X' 
+		 	ELSE 'OT' 
+		END AS PDX
+		,CONDITION_CONCEPT_ID||'/'||C.CONCEPT_CODE AS RAW_DX
+		,'SNOMED'||'/'||C.VOCABULARY_ID AS RAW_DX_TYPE
+		,CONDITION_STATUS_SOURCE_VALUE AS RAW_DX_SOURCE
+		,CONDITION_TYPE_CONCEPT_ID AS RAW_PDX
+	FROM
+		RD_OMOP_PROD..CONDITION_OCCURRENCE CO
+		JOIN CDRN_VUMC_DEV..ENCOUNTER_XWALK X ON X.VISIT_OCCURRENCE_ID = CO.VISIT_OCCURRENCE_ID
+		JOIN CDRN_VUMC_DEV..ENCOUNTER ENC ON X.ENCOUNTERID = ENC.ENCOUNTERID
+		JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = CO.CONDITION_SOURCE_CONCEPT_ID
+			,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+	WHERE CONDITION_CONCEPT_ID != 0
+			AND ENC.ADMIT_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE
+			AND CO.VISIT_OCCURRENCE_ID != 0
+			AND C.VOCABULARY_ID  IN ( 'ICD9CM', 'ICD10CM', 'SNOMED')
+			)
+
+;
+--80077128
+select max(ADMIT_DATE) from XUS4.DIAG_OMOP_U where DX_TYPE = '09';
+select min(ADMIT_DATE) from XUS4.DIAG_OMOP_U where DX_TYPE = '10';
+
+
+select max(ADMIT_DATE) from XUS4.DIAGNOSIS where DX_TYPE = '09';
+select min(ADMIT_DATE) from XUS4.DIAGNOSIS where DX_TYPE = '10';
+-- ICD-10 10-01-2015
+
+DROP TABLE DIAG_OMOP_U_RANK;
+TRUNCATE TABLE DIAG_OMOP_U_RANK;
+select * from DIAG_OMOP_U;
+
+
+;
+INSERT INTO DIAG_OMOP_U_RANK
+(SELECT *,
+RANK() OVER (PARTITION BY PATID, ENCOUNTERID, DX, DX_TYPE  --, DU.PDX
+		                  ORDER BY DECODE(DX_SOURCE, 3,1,7,2,--DI
+						                           		4,3,--FI
+												   		1,4,2,5--UN
+														),
+									RAW_PDX, 
+								   PDX) AS RANK_SRC
+								 
+FROM DIAG_OMOP_U AS DU
+)
+;
+-- 80077128
+
+---------------------------
+TRUNCATE TABLE DIAGNOSIS;
+INSERT INTO DIAGNOSIS
+SELECT
+	NEXT VALUE FOR CDRN..CDM_DIAGNOSIS_SEQ AS DIAGNOSISID 
+	,*
+FROM
+	(
+		SELECT DISTINCT
+			PATID
+			,ENCOUNTERID
+			,ENC_TYPE
+			,ADMIT_DATE
+			,PROVIDERID
+			,DX
+			,DX_TYPE
+			,CASE WHEN DX_SOURCE IN (3, 7) THEN 'DI'
+			     WHEN DX_SOURCE = 4 THEN 'FI'
+				 ELSE 'UN'
+				END AS DX_SOURCE	 
+			,'BI' AS DX_ORIGIN
+			,PDX 
+			,RAW_DX 
+	        ,RAW_DX_TYPE 
+	        ,RAW_DX_SOURCE 
+	        ,RAW_PDX 
+		FROM 	
+			DIAG_OMOP_U_RANK AS DU
+			
+		WHERE
+			RANK_SRC = 1
+)X
+;
+
+-- 55288371
+SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..DIAGNOSIS;
+-- 56240513
+SELECT COUNT(*) FROM CDRN_VUMC_DEV..DIAGNOSIS;
+-- 55288371
+
+---------############################################################-----------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##---DEATH_CAUSE FROM DIAGNOSIS DEATH ENCOUNTER TABLES----##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################-----------
+	
+
+------------------------------------------------------------------------------------------------------------------------------
+SELECT COUNT(*) FROM DEATH_CAUSE; --279933
+TRUNCATE TABLE DEATH_CAUSE;
+INSERT INTO DEATH_CAUSE
+SELECT DISTINCT
+	C.PATID
+	,A.DX AS DEATH_CAUSE
+	,A.DX_TYPE AS DEATH_CAUSE_CODE  
+	,'NI' AS DEATH_CAUSE_TYPE
+	,'L' AS DEATH_CAUSE_SOURCE
+	,'E' AS DEATH_MATCH_CONFIDENCE
+FROM
+	CDRN_VUMC_DEV..DIAGNOSIS AS A
+	JOIN CDRN_VUMC_DEV..DEATH AS C 
+		ON A.PATID = C.PATID
+	JOIN CDRN..DEATH_CAUSE_ICD_CODES AS D
+		ON D.ICD = TRIM(A.DX)
+	JOIN (SELECT DISTINCT PATID, ENCOUNTERID
+		    FROM (SELECT E.PATID, E.ENCOUNTERID,
+		                 RANK() OVER (PARTITION BY E.PATID 
+			                              ORDER BY (TO_CHAR(E.ADMIT_DATE, 'YYYY-MM-DD')||' '||E.ADMIT_TIME)::TIMESTAMP DESC) RN
+		            FROM DIAG_OMOP D
+					     JOIN CDRN_VUMC_DEV..ENCOUNTER E ON D.ENCOUNTERID = E.ENCOUNTERID
+						 JOIN CDRN..DEATH_CAUSE_ICD_CODES AS C ON C.ICD = TRIM(D.DX)) A
+		   WHERE RN = 1) r ON A.PATID = R.PATID AND A.ENCOUNTERID = R.ENCOUNTERID --YJ: GET MOST RECENT ENC THAT HAS DIAG CODES
+;
+-- 280123
+-------------------------------------------------------------------------------------------------------------------------------------
+	
+
+	
+	
+	
+---------############################################################-----------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##------------ procedure_occurrence -> procedure----------##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################-----------
+	
+	
+SELECT DISTINCT 
+	ENC.PATID
+	,ENC.ENCOUNTERID
+	,ENC.ENC_TYPE
+	,ENC.ADMIT_DATE
+	,ENC.PROVIDERID
+	,C.CONCEPT_CODE AS PX
+	,CASE 
+		WHEN C.VOCABULARY_ID = 'ICD9PROC' THEN '09'
+		WHEN C.VOCABULARY_ID = 'ICD10PCS' THEN '10'
+		WHEN C.VOCABULARY_ID = 'ICD11PCS' THEN '11'
+		WHEN C.VOCABULARY_ID = 'CPT4' THEN 'CH'
+		WHEN C.VOCABULARY_ID = 'HCPCS'THEN 'CH'
+		--WHEN C.VOCABULARY_ID = 'SNOMED' THEN 'OT'
+		WHEN C.VOCABULARY_ID = 'NONE' THEN 'NI'
+	END AS PX_TYPE
+	, 'BI' AS PX_SOURCE
+	,C.CONCEPT_NAME  AS RAW_PX
+	,C.VOCABULARY_ID AS RAW_PX_TYPE
+
+FROM
+	RD_OMOP_PROD..PROCEDURE_OCCURRENCE PO
+	LEFT JOIN CDRN_VUMC_DEV..ENCOUNTER_XWALK_OMOP X ON X.VISIT_OCCURRENCE_ID =PO.VISIT_OCCURRENCE_ID
+	LEFT JOIN CDRN_VUMC_DEV..ENCOUNTER ENC ON ENC.ENCOUNTERID =X.ENCOUNTERID
+	LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = PO.PROCEDURE_CONCEPT_ID
+WHERE C.VOCABULARY_ID IN ( 'CPT4'
+							,'ICD9PROC'
+							,'ICD10PCS'
+							,'HCPCS'
+							, 'LOINC' -- not populated in omop
+							)
+
+
+;
+
+SELECT
+	DISTINCT
+	ENC.PATID
+	,ENC.ENCOUNTERID
+	,ENC.ENC_TYPE
+	,ENC.ADMIT_DATE
+	,ENC.PROVIDERID
+	,C.CONCEPT_CODE AS PX
+	/*,CASE 
+		WHEN C.VOCABULARY_ID = 'ICD9PROC' THEN '09'
+		WHEN C.VOCABULARY_ID = 'ICD10PCS' THEN '10'
+		WHEN C.VOCABULARY_ID = 'ICD11PCS' THEN '11'
+		WHEN C.VOCABULARY_ID = 'LOINC' THEN 'LC'
+		WHEN C.VOCABULARY_ID = 'CPT4' THEN 'CH'
+		WHEN C.VOCABULARY_ID = 'HCPCS'THEN 'CH'
+		--WHEN C.VOCABULARY_ID = 'SNOMED' THEN 'OT'
+		WHEN C.VOCABULARY_ID = 'NONE' THEN 'NI'
+		END AS PX_TYPE
+		*/
+		,C.VOCABULARY_ID
+	
+	, 'BI' AS PX_SOURCE
+	,C.CONCEPT_NAME  AS RAW_PX
+	,C.VOCABULARY_ID AS RAW_PX_TYPE
+FROM RD_OMOP_PROD.. measurement PO
+
+LEFT JOIN CDRN_VUMC_DEV..ENCOUNTER_XWALK_OMOP X ON X.VISIT_OCCURRENCE_ID =PO.VISIT_OCCURRENCE_ID
+	LEFT JOIN CDRN_VUMC_DEV..ENCOUNTER ENC ON ENC.ENCOUNTERID =X.ENCOUNTERID
+	LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = PO.measurement_CONCEPT_ID
+	WHERE PO.VISIT_OCCURRENCE_ID NOTNULL AND
+	C.VOCABULARY_ID IN ( 'CPT4'
+							,'ICD9PROC'
+							,'ICD10PCS'
+							,'HCPCS'
+							, 'LOINC' -- not populated in omop
+							)
+	;
+	
+-- check the ICD9, CPT HCPCS vocabs from the following table .					
+select count(*), VOCABULARY_ID from RD_OMOP_PROD..OBSERVATION po join RD_OMOP_PROD..CONCEPT C on c.CONCEPT_ID = po.OBSERVATION_CONCEPT_ID group by 2;
+select count(*), VOCABULARY_ID from RD_OMOP_PROD.SWAMYL.PROCEDURE_OCCURRENCE po join RD_OMOP_PROD..CONCEPT C on c.CONCEPT_ID = po.PROCEDURE_CONCEPT_ID group by 2;
+select count(*), VOCABULARY_ID from RD_OMOP_PROD..CONDITION_OCCURRENCE po join RD_OMOP_PROD..CONCEPT C on c.CONCEPT_ID = po.CONDITION_CONCEPT_ID group by 2;
+select count(*), VOCABULARY_ID from RD_OMOP_PROD..MEASUREMENT po join RD_OMOP_PROD..CONCEPT C on c.CONCEPT_ID = po.MEASUREMENT_CONCEPT_ID group by 2;						
+
+-- CREATE the temp table for procedure
+-- DROP TABLE PROCEDURE_U;
+TRUNCATE TABLE PROCEDURE_U;
+INSERT INTO PROCEDURE_U 
+
+(SELECT
+VOCABULARY_ID, CONCEPT_NAME, CONCEPT_CODE, VISIT_OCCURRENCE_ID, MEASUREMENT_DATE PX_DATE 
+FROM RD_OMOP_PROD..measurement MO
+LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = MO.measurement_CONCEPT_ID
+WHERE UPPER(C.VOCABULARY_ID) IN ( 'CPT4'
+							,'ICD9PROC'  -- not populated in omop
+							,'ICD10PCS'  -- not populated in omop
+							,'HCPCS'
+							, 'LOINC' -- not populated in omop
+							)
+	 AND MO.VISIT_OCCURRENCE_ID != 0)
+	 
+	 UNION 
+(SELECT
+VOCABULARY_ID, CONCEPT_NAME, CONCEPT_CODE, VISIT_OCCURRENCE_ID , PROCEDURE_DATE PX_DATE 
+FROM RD_OMOP_PROD..PROCEDURE_OCCURRENCE PX
+LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = PX.PROCEDURE_CONCEPT_ID
+WHERE UPPER(C.VOCABULARY_ID) IN ( 'CPT4'
+							,'ICD9PROC'
+							,'ICD10PCS'
+							,'HCPCS'
+							 , 'LOINC' -- not populated in omop
+							)
+	 AND PX.VISIT_OCCURRENCE_ID != 0)
+UNION
+	 
+(SELECT
+VOCABULARY_ID, CONCEPT_NAME, CONCEPT_CODE, VISIT_OCCURRENCE_ID, OBSERVATION_DATE PX_DATE
+FROM RD_OMOP_PROD..OBSERVATION PX
+LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = PX.OBSERVATION_CONCEPT_ID
+WHERE UPPER(C.VOCABULARY_ID) IN ( 'CPT4'
+							,'ICD9PROC'  -- not populated in omop
+							,'ICD10PCS'  -- not populated in omop
+							,'HCPCS'
+							 , 'LOINC' -- not populated in omop
+							)
+	 AND PX.VISIT_OCCURRENCE_ID != 0)
+
+UNION
+(SELECT
+VOCABULARY_ID, CONCEPT_NAME, CONCEPT_CODE, VISIT_OCCURRENCE_ID, DEVICE_EXPOSURE_START_DATE PX_DATE
+FROM RD_OMOP_PROD..DEVICE_EXPOSURE DE
+LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = DE.DEVICE_CONCEPT_ID
+WHERE UPPER(C.VOCABULARY_ID) IN ( 
+							'CPT4'
+							,'ICD9PROC'  -- not populated in omop
+							,'ICD10PCS'  -- not populated in omop
+							,'HCPCS'
+							, 'LOINC' -- not populated in omop
+							)
+	 AND DE.VISIT_OCCURRENCE_ID != 0)	
+
+
+
+UNION
+
+(SELECT
+VOCABULARY_ID, CONCEPT_NAME, CONCEPT_CODE, VISIT_OCCURRENCE_ID, DRUG_EXPOSURE_START_DATE PX_DATE
+FROM RD_OMOP_PROD..DRUG_EXPOSURE DE
+LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = DE.DRUG_CONCEPT_ID
+WHERE UPPER(C.VOCABULARY_ID) IN ( 
+							'CPT4'
+							,'ICD9PROC'  -- not populated in omop
+							,'ICD10PCS'  -- not populated in omop
+							,'HCPCS'
+							, 'LOINC' -- not populated in omop
+							)
+	 AND DE.VISIT_OCCURRENCE_ID != 0)	
+	/*
+	 
+	 (SELECT
+VOCABULARY_ID, CONCEPT_NAME, CONCEPT_CODE, VISIT_OCCURRENCE_ID, CONDITION_START_DATE PX_DATE
+FROM RD_OMOP_PROD..CONDITION_OCCURRENCE DE
+LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = DE.CONDITION_CONCEPT_ID
+WHERE UPPER(C.VOCABULARY_ID) IN ( 
+							'CPT4'
+							,'ICD9PROC'  -- not populated in omop
+							,'ICD10PCS'  -- not populated in omop
+							,'HCPCS'
+							, 'LOINC' -- not populated in omop
+							)
+	 AND DE.VISIT_OCCURRENCE_ID != 0)	
+	 */ 
+;
+-- 130366487
+
+
+SELECT COUNT(*) FROM PROCEDURES; --98403191
+TRUNCATE TABLE PROCEDURES;
+INSERT INTO PROCEDURES
+SELECT
+	NEXT VALUE FOR CDRN..CDM_PROCEDURES_SEQ AS PROCEDURESID
+	,Y.*
+FROM
+(SELECT 
+	DISTINCT
+	ENC.PATID
+	,ENC.ENCOUNTERID
+	,ENC.ENC_TYPE
+	,ENC.ADMIT_DATE
+	,ENC.PROVIDERID
+	,PX_DATE
+	,PO.CONCEPT_CODE AS PX
+	,CASE 
+		WHEN UPPER(VOCABULARY_ID) = 'ICD9PROC' THEN '09'
+		WHEN UPPER(VOCABULARY_ID) = 'ICD10PCS' THEN '10'
+		WHEN UPPER(VOCABULARY_ID) = 'ICD11PCS' THEN '11'
+		WHEN UPPER(VOCABULARY_ID) = 'LOINC' THEN 'LC'
+		WHEN UPPER(VOCABULARY_ID) = 'CPT4' THEN 'CH'
+		WHEN UPPER(VOCABULARY_ID) = 'HCPCS'THEN 'CH'
+		--WHEN VOCABULARY_ID = 'SNOMED' THEN 'OT'
+		WHEN UPPER(VOCABULARY_ID) = 'NONE' THEN 'NI'
+		END AS PX_TYPE
+
+	, 'BI' AS PX_SOURCE
+	,PO.CONCEPT_CODE  AS RAW_PX
+	,PO.VOCABULARY_ID AS RAW_PX_TYPE
+
+FROM 
+	PROCEDURE_U PO
+	LEFT JOIN CDRN_VUMC_DEV..ENCOUNTER_XWALK X ON X.VISIT_OCCURRENCE_ID =PO.VISIT_OCCURRENCE_ID
+	LEFT JOIN CDRN_VUMC_DEV..ENCOUNTER ENC ON ENC.ENCOUNTERID =X.ENCOUNTERID
+	LEFT JOIN DEATH AS DE  ON DE.PATID = ENC.PATID
+	,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+WHERE
+		 NVL(DE.DEATH_DATE,CURRENT_DATE) >= PX_DATE 
+			AND PX_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE
+		
+) Y 
+;
+
+-- 90188949
+
+
+SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..PROCEDURES
+;
+--98403191
+SELECT COUNT(*), PX_TYPE  FROM CDRN_VUMC_PRODUCTION..PROCEDURES  GROUP BY 2;
+	-- COUNT, PX_TYPE
+	-- 1564466 '09'
+	-- 454987 '10'
+	-- 78776047 'CH'
+	--64561733
+	
+SELECT COUNT(*), PX_TYPE FROM PROCEDURES  GROUP BY 2;
+	-- COUNT, PX_TYPE
+	-- 1564713 '09'
+	-- 457112 '10'
+	-- 96381366 'CH'
+	
+	-- NEW COUNT
+	-- COUNT	PX_TYPE
+	--88149955	CH
+	--1565372	09
+	--473622	10
+
+
+
+---------############################################################-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------##------------MEASUREMENT ->  LAB_RESULT_CM---------------##-----------
+---------##--------------------------------------------------------##-----------
+---------##--------------------------------------------------------##-----------
+---------############################################################----------- 
+TRUNCATE TABLE LAB_RESULT_CM_U;
+INSERT INTO LAB_RESULT_CM_U 
+SELECT 
+		M.PERSON_ID --AS PATID
+		,VISIT_OCCURRENCE_ID
+		,CM.CONCEPT_NAME AS LAB_NAME
+		,CM.CONCEPT_NAME AS SPECIMEN_SOURCE
+		,CM.CONCEPT_CODE AS LAB_LOINC
+		,NULL AS PRIORITY
+		,'L' AS RESULT_LOC
+		,NULL AS LAB_PX
+		,NULL AS LAB_PX_TYPE
+		,NULL AS LAB_ORDER_DATE
+		,M.MEASUREMENT_DATE AS SPECIMEN_DATE
+		,TO_CHAR(MEASUREMENT_DATETIME, 'HH24:MI') AS SPECIMEN_TIME
+		,X_RESULTED_DATE AS RESULT_DATE
+		--,NULL RESULT_DATE
+		,CASE WHEN X_RESULTED_DATE IS NULL THEN NULL
+			ELSE TO_CHAR(MEASUREMENT_DATETIME, 'HH24:MI') END 
+		AS RESULT_TIME
+		--,NULL RESULT_TIME
+		,NULL RESULT_QUAL
+		,VALUE_AS_NUMBER RESULT_NUM
+		,CASE 
+			WHEN OPERATOR_CONCEPT_ID = 4172704 THEN 'GT'
+			WHEN OPERATOR_CONCEPT_ID = 4171754 THEN 'LE'
+			WHEN OPERATOR_CONCEPT_ID = 4171756 THEN 'LT'
+			WHEN OPERATOR_CONCEPT_ID = 4171755 THEN 'GE'
+			WHEN OPERATOR_CONCEPT_ID = 0 THEN 'EQ'
+			ELSE 'EQ'
+			END
+			AS RESULT_MODIFIER
+
+		,UNIT_SOURCE_VALUE AS RESULT_UNIT
+		,RANGE_LOW AS NORM_RANGE_LOW
+		,NULL AS NORM_MODIFIER_LOW
+		,RANGE_HIGH AS NORM_RANGE_HIGH
+		,NULL AS NORM_MODIFIER_HIGH
+		,CASE
+			WHEN X_OUT_RANGE = 'H' THEN 'AH'
+			WHEN X_OUT_RANGE = 'L' THEN 'AL'
+			WHEN X_OUT_RANGE = 'N' THEN 'NL'
+			WHEN X_OUT_RANGE IN ('NA','') THEN 'NI'
+			WHEN X_OUT_RANGE IS NULL THEN 'NI'
+		ELSE 'OT' 
+		END AS ABN_IND
+		
+		,CM.CONCEPT_NAME AS RAW_LAB_NAME
+		,CM.CONCEPT_CODE AS RAW_LAB_CODE
+		
+		,VALUE_AS_NUMBER AS RAW_RESULT
+		,UNIT_SOURCE_VALUE AS  RAW_UNIT
+		
+		,CAR.CARE_SITE_SOURCE_VALUE AS RAW_FACILITY_CODE
+	FROM RD_OMOP_PROD..MEASUREMENT M
+	LEFT JOIN RD_OMOP_PROD..X_LABS MX ON MX.MEASUREMENT_ID = M.MEASUREMENT_ID
+	LEFT JOIN RD_OMOP_PROD..CONCEPT CM ON CM.CONCEPT_ID = M.MEASUREMENT_CONCEPT_ID
+	LEFT JOIN RD_OMOP_PROD..PROVIDER PRV ON PRV.PROVIDER_ID = M.PROVIDER_ID
+	LEFT JOIN RD_OMOP_PROD..CARE_SITE CAR ON  CAR.CARE_SITE_ID = PRV.CARE_SITE_ID
+	
+	WHERE CM.VOCABULARY_ID = 'LOINC' AND UPPER(CM.CONCEPT_CLASS_ID) = 'LAB TEST' 
+	;
+	
+	--318885484
+	
+	SELECT COUNT(*) FROM LAB_RESULT_CM; -- 192844423
+	TRUNCATE TABLE LAB_RESULT_CM;
+	
+	INSERT INTO LAB_RESULT_CM
+	SELECT 
+		NEXT VALUE FOR CDRN..CDM_LAB_RESULT_CM_SEQ AS LAB_RESULT_CM_ID 
+	,*
+	FROM
+	(SELECT DISTINCT 
+	PX.PATID::VARCHAR(64) PATID
+	,X.ENCOUNTERID::VARCHAR(64)
+	
+	,CASE 
+        WHEN LAB_U.LAB_LOINC IN ( '41995-2','4548-4','17855-8','4549-2','17856-6','62388-4','71875-9','59261-8' ) THEN 'A1C'
+        WHEN LAB_U.LAB_LOINC IN ( '2156-8','50756-6','16688-4','2151-9','53433-9','2157-6' ) THEN 'CK'
+        WHEN LAB_U.LAB_LOINC IN ('49551-5','51506-4','32673-6','2154-3','13969-1','6773-6' ) THEN 'CK _MB'
+        WHEN LAB_U.LAB_LOINC IN ( '20569-0','12189-7','12187-1','72564-8','72563-0','49136-5','12188-9' ) THEN 'CK_MBI'
+        WHEN LAB_U.LAB_LOINC IN ( '2160-0','2161-8','38483-4','35674-1','2162-6','12190-5','20624-3','12571-6','14400-6' ) THEN 'CREATININE' 
+        WHEN LAB_U.LAB_LOINC IN ( '718-7','20509-6','55782-7','59260-0','54289-4','61180-6','30313-1','14775-1','75928-2','30352-9','40719-7','30354-5','33026-6','30353-7','33025-8','30351-1','76768-1','30350-3','76769-9','33509-1','719-5','69950-4','723-7','35183-3','722-9','724-5','42223-6' ) THEN 'HGB'
+        WHEN LAB_U.LAB_LOINC IN ( '53133-5','12773-8','2089-1','13457-7','18262-6','49132-4','55440-2','35198-1','14155-6','22748-8','39469-2','69419-0','18261-8','2090-9') THEN 'LDL'
+        WHEN LAB_U.LAB_LOINC IN ( '34714-6','46418-0','6301-6','38875-1','61189-7' ) THEN 'INR'
+        WHEN LAB_U.LAB_LOINC IN ( '10839-9', '16255-2', '42757-5', '49563-0' ) THEN 'TROP_I'
+        WHEN LAB_U.LAB_LOINC IN ( '33204-9', '48426-1' ) THEN 'TROP_T_QL'
+        WHEN LAB_U.LAB_LOINC IN ( '48425-3','6597-9','6598-7','67151-1')  THEN 'TROP_T_QN'
+     ELSE 'OT ' END AS LAB_NAME
+		
+	,CASE 
+		WHEN STAGE.SPECIMEN_SOURCE IS NULL THEN 'NI' 
+		WHEN STAGE.SPECIMEN_SOURCE IN ('BLOOD','PLASMA','PPP','SERUM','SR_PLS','URINE') THEN STAGE.SPECIMEN_SOURCE
+		ELSE 'OT'
+		END ::VARCHAR(10) AS SPECIMEN_SOURCE
+	,LAB_U.LAB_LOINC::VARCHAR(10) AS LAB_LOINC
+	,PRIORITY
+	,RESULT_LOC
+	,LAB_PX
+	,LAB_PX_TYPE
+	,LAB_ORDER_DATE::DATE LAB_ORDER_DATE
+	,SPECIMEN_DATE::DATE SPECIMEN_DATE
+	,SPECIMEN_TIME::VARCHAR(5) AS SPECIMEN_TIME
+	,RESULT_DATE::DATE AS RESULT_DATE
+	,RESULT_TIME
+	,RESULT_QUAL
+	,RESULT_NUM
+	,RESULT_MODIFIER
+	,SUBSTR(RESULT_UNIT, 1, 11) RESULT_UNIT
+	,NORM_RANGE_LOW::VARCHAR(10) NORM_RANGE_LOW
+	,NULL NORM_MODIFIER_LOW
+	,NORM_RANGE_HIGH::VARCHAR(10) NORM_RANGE_HIGH
+	,NULL NORM_MODIFIER_HIGH
+	,ABN_IND
+	,SUBSTR(LAB_U.RAW_LAB_NAME, 1, 64) RAW_LAB_NAME
+	,RAW_LAB_CODE::VARCHAR(64) AS RAW_LAB_CODE
+	,NULL AS RAW_PANEL
+	,RAW_RESULT::VARCHAR(64) RAW_RESULT
+	,RAW_UNIT::VARCHAR(64) RAW_UNIT
+	,NULL AS RAW_ORDER_DEPT   
+	, RAW_FACILITY_CODE
+	FROM LAB_RESULT_CM_U LAB_U
+	LEFT OUTER JOIN CDRN..LAB_LOINC_X_STAGE AS STAGE ON (STAGE.LAB_LOINC = LAB_U.LAB_LOINC AND STAGE.IS_VALID = 'Y')
+	LEFT JOIN (SELECT PERSON_ID, PERSON_SOURCE_VALUE FROM RD_OMOP_PROD..PERSON ) P ON P.PERSON_ID = LAB_U.PERSON_ID 
+	JOIN CDRN_VUMC_DEV..CDM_PATID_MRN_XWALK PX ON PX.MRN =P.PERSON_SOURCE_VALUE
+	LEFT JOIN CDRN_VUMC_DEV..ENCOUNTER_XWALK X ON X.VISIT_OCCURRENCE_ID =LAB_U.VISIT_OCCURRENCE_ID
+	
+	,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') DT
+	WHERE LAB_U.SPECIMEN_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE) LAB_F
+	
+	--DISTRIBUTE ON (PATID)
+	;
+	-- 250065374
+	
+	
+	SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..LAB_RESULT_CM;
+
+---------############################################################-----------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##-------------------MEASUREMENT --> VITAL ---------------##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################----------- 
+
+
+
+select count(*), c.concept_name , measurement_concept_id from RD_OMOP_PROD..MEASUREMENT M left join RD_OMOP_PROD..CONCEPT c on c.CONCEPT_ID = m.MEASUREMENT_CONCEPT_ID where measurement_concept_id in 
+(
+  3036277 -- 'Body height'
+, 3023540 --'Body height Measured'
+, 3038553 -- 'Body mass index'
+, 3025315 --'Body weight'
+, 3013762 --'Body weight Measured'
+, 3012888 --'BP diastolic'
+, 3019962 --'Diastolic blood pressure--standing'
+, 3034703 --'Diastolic blood pressure--sitting'
+, 3013940 --'Diastolic blood pressure--supine'
+, 3018586 --'Systolic blood pressure--sitting'
+, 3035856 --'Systolic blood pressure--standing'
+, 3009395 --'Systolic blood pressure--supine'
+, 3004249 --'BP systolic'
+, 3028737 --'BP systolic'
+, 3031543 -- 'Body mass index'
+
+)
+GROUP BY 2, 3
+;
+/*
+COUNT	CONCEPT_NAME	MEASUREMENT_CONCEPT_ID
+7006121	Body height	3036277
+14103667	Body weight	3025315
+25581738	Body mass index	3038553
+45780058	BP systolic	3004249
+45780058	BP diastolic	3012888
+*/
+
+/*
+COUNT	CONCEPT_NAME	MEASUREMENT_CONCEPT_ID
+7273082	Body height	3036277
+14517725	Body weight	3025315
+47025245	BP diastolic	3012888
+47025245	BP systolic	3004249
+26383356	Deprecated Body mass index (BMI)	3031543
+*/
+
+select count(*), c.concept_name , measurement_concept_id from rd_OMOP_prod..MEASUREMENT M left join RD_OMOP_PROD..CONCEPT c on c.CONCEPT_ID = m.MEASUREMENT_CONCEPT_ID where measurement_concept_id in 
+(
+  3036277 -- 'Body height'
+, 3023540 --'Body height Measured'
+, 3038553 -- 'Body mass index'
+, 3025315 --'Body weight'
+, 3013762 --'Body weight Measured'
+, 3012888 --'BP diastolic'
+, 3019962 --'Diastolic blood pressure--standing'
+, 3034703 --'Diastolic blood pressure--sitting'
+, 3013940 --'Diastolic blood pressure--supine'
+, 3018586 --'Systolic blood pressure--sitting'
+, 3035856 --'Systolic blood pressure--standing'
+, 3009395 --'Systolic blood pressure--supine'
+, 3004249 --'BP systolic'
+, 3028737 --'BP systolic'
+
+)
+GROUP BY 2, 3
+;
+
+TRUNCATE TABLE VITAL_U;
+INSERT INTO VITAL_U 
+	SELECT
+		NVL(PATID1, PATID2) PATID1
+		,NVL(MEASURE_DATE1, MEASURE_DATE2) MEASURE_DATE1
+		,NVL(MEASURE_TIME1, MEASURE_TIME2) MEASURE_TIME1
+		,DIASTOLIC
+		,SYSTOLIC
+		,WT
+		,HT
+		,ORIGINAL_BMI
+	FROM
+				(SELECT 
+					NVL(PATID1, PATID2) PATID1
+					,NVL(MEASURE_DATE1, MEASURE_DATE2) MEASURE_DATE1
+					,NVL(MEASURE_TIME1, MEASURE_TIME2) MEASURE_TIME1
+					,DIASTOLIC
+					,SYSTOLIC
+					,WT
+					,HT
+				FROM
+								(SELECT 
+									NVL(PATID1, PATID2) PATID1
+									,NVL(MEASURE_DATE1, MEASURE_DATE2) MEASURE_DATE1
+									,NVL(MEASURE_TIME1, MEASURE_TIME2) MEASURE_TIME1
+									,DIASTOLIC
+									,SYSTOLIC
+									,WT
+								FROM 
+								-- linking BP systolic and diastolic data
+								(SELECT 
+									PATID1
+									,MEASURE_DATE1
+									, MEASURE_TIME1
+									, MIN(V1,V2 )::NUMERIC(15,8) AS DIASTOLIC
+									, MAX(V1, V2)::NUMERIC(15,8) AS SYSTOLIC
+								From
+									(select 
+										m1.PERSON_ID PATID1
+										,m1.MEASUREMENT_DATE ::DATE AS MEASURE_DATE1
+										, to_char(m1.MEASUREMENT_DATETIME, 'HH24:MI') AS MEASURE_TIME1
+										, m1.VALUE_AS_NUMBER AS V1
+										, m2.VALUE_AS_NUMBER AS V2
+									 
+									FROM RD_OMOP_PROD..MEASUREMENT m1
+										left join (select FACT_ID_1, FACT_ID_2 from RD_OMOP_PROD..fact_relationship where relationship_concept_id=700001389) FR ON m1.MEASUREMENT_ID  = FR.FACT_ID_1
+										left join RD_OMOP_PROD..MEASUREMENT m2 ON m2.MEASUREMENT_ID  = FR.FACT_ID_2
+									WHERE m1.MEASUREMENT_CONCEPT_ID=3004249 and V1 NOTNULL AND V2 NOTNULL
+									)DIA_SYS) BP 
+								FULL OUTER JOIN 
+								(select 
+								PERSON_ID PATID2
+								,MEASUREMENT_DATE::DATE AS MEASURE_DATE2
+								, to_char(m1.MEASUREMENT_DATETIME, 'HH24:MI') AS MEASURE_TIME2
+								, CASE WHEN UNIT_SOURCE_VALUE IN ('Kg','kg') THEN round(VALUE_AS_NUMBER * 2.2046226218, 5)
+										WHEN UNIT_SOURCE_VALUE IN ('lbs','lb') THEN round(VALUE_AS_NUMBER, 5)
+										ELSE NULL END --:: NUMERIC(15,8)
+										AS WT
+								
+								FROM RD_OMOP_PROD..MEASUREMENT m1
+								WHERE m1.MEASUREMENT_CONCEPT_ID=3025315 AND WT NOTNULL 
+								
+								) wt 
+
+								ON PATID1 = PATID2 AND MEASURE_TIME2 = MEASURE_TIME1 AND MEASURE_DATE1 = MEASURE_DATE2
+						)BP_WT
+				
+				
+				FULL OUTER JOIN 
+				
+				(select 
+				PERSON_ID PATID2
+				,MEASUREMENT_DATE::DATE AS MEASURE_DATE2
+				, to_char(m1.MEASUREMENT_DATETIME, 'HH24:MI') AS MEASURE_TIME2
+				,CASE WHEN UNIT_SOURCE_VALUE= 'cm' THEN round(VALUE_AS_NUMBER*0.3937007874, 5)
+					WHEN UNIT_SOURCE_VALUE= 'inches' THEN round(VALUE_AS_NUMBER, 5)
+					ELSE NULL END -- :: NUMERIC(15,8)
+					AS HT
+				--, m1.UNIT_SOURCE_VALUE  
+				FROM RD_OMOP_PROD..MEASUREMENT m1
+				WHERE m1.MEASUREMENT_CONCEPT_ID=3036277 AND HT NOTNULL 
+				--ORDER BY HT DESC 
+				) HT 
+				
+					ON PATID1 = PATID2 AND MEASURE_TIME2 = MEASURE_TIME1 AND MEASURE_DATE1 = MEASURE_DATE2
+					) BP_WT_HT
+	
+	FULL OUTER JOIN
+					
+	(select 
+	PERSON_ID PATID2
+	,MEASUREMENT_DATE::DATE AS MEASURE_DATE2
+	,to_char(MEASUREMENT_DATETIME, 'HH24:MI') AS MEASURE_TIME2
+	,VALUE_AS_NUMBER ORIGINAL_BMI
+	--, UNIT_SOURCE_VALUE   
+	from RD_OMOP_PROD..measurement where measurement_concept_id IN (3038553, 3031543 )) BMI
+	ON PATID1 = PATID2 AND MEASURE_TIME2 = MEASURE_TIME1 AND MEASURE_DATE1 = MEASURE_DATE2
+	--ON HT.PERSON_ID2 = WT.PERSON_ID1 AND HT.MEASURE_DATE = WT.MEASURE_DATE AND HT.MEASURE_TIME=WT.MEASURE_TIME
+	
+	
+	-- 'Body mass index'
+	;
+	-- 104294956
+	-- 48077303
+	select * from VITAL_U;
+select count(*) from vital;--48077303
+TRUNCATE TABLE VITAL;
+
+INSERT INTO VITAL
+
+SELECT
+	NEXT VALUE FOR CDRN..CDM_VITAL_SEQ AS VITALID
+		, Y.* 
+	FROM
+	(				
+	SELECT DISTINCT
+		X.PATID::VARCHAR(64) PATID
+		,NULL ENCOUNTERID
+		,MEASURE_DATE1::DATE AS MEASURE_DATE
+		,MEASURE_TIME1::VARCHAR(5) MEASURE_TIME 
+		,'HC' AS VITAL_SOURCE
+		,CASE WHEN HT IS NULL OR HT > 9999 THEN NULL
+			ELSE HT::NUMERIC(15,8) END HT
+		,CASE WHEN WT IS NULL OR WT > 9999 THEN NULL
+			ELSE WT::NUMERIC(15,8) END WT
+		,DIASTOLIC AS DIASTOLIC
+		,SYSTOLIC AS SYSTOLIC
+		,CASE WHEN ORIGINAL_BMI IS NULL OR ORIGINAL_BMI > 9999 THEN NULL
+			ELSE ORIGINAL_BMI::NUMERIC(15,8) END AS ORIGINAL_BMI 
+		,NULL AS BP_POSITION
+		,NULL AS SMOKING 
+		,NULL AS TOBACCO 
+		,NULL AS TOBACCO_TYPE 
+		,DIASTOLIC::VARCHAR(64) AS RAW_DIASTOLIC
+		,SYSTOLIC::VARCHAR(64)  AS RAW_SYSTOLIC
+		,NULL AS RAW_BP_POSITION 
+		,NULL AS RAW_SMOKING 
+		,NULL AS RAW_TOBACCO 
+		,NULL AS RAW_TOBACCO_TYPE 
+	FROM
+		CDRN_VUMC_DEV..VITAL_U AS VU
+		LEFT JOIN RD_OMOP_PROD..PERSON AS P ON VU.PATID1 = P.PERSON_ID
+		LEFT JOIN CDRN_VUMC_DEV..CDM_PATID_MRN_XWALK AS X ON X.MRN = P.PERSON_SOURCE_VALUE
+		LEFT JOIN CDRN_VUMC_DEV..DEATH AS DE ON DE.PATID = X.PATID
+		JOIN CDRN_VUMC_DEV..DEMOGRAPHIC AS D ON D.PATID = X.PATID
+		,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') AS DT
+	WHERE
+		VU.MEASURE_DATE1 BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE
+		
+		AND 
+		VU.MEASURE_DATE1 BETWEEN NVL(D.BIRTH_DATE,'01-01-1900') AND NVL(DE.DEATH_DATE,CURRENT_DATE)
+		
+									
+		)Y
+--DISTRIBUTE ON (PATID)
+;
+--48,438,382
+SELECT COUNT(* ) FROM CDRN_VUMC_PRODUCTION..VITAL;
+--40,510,785
+SELECT COUNT(* ) FROM VITAL;
+--48,438,382
+	
+
+---------############################################################-----------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##------------ CONDITION_OCCURRENCE -> CONDITION ---------##--------
+---------##-------------OBSERVATION--------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################-----------
+
+SELECT COUNT(*), CONCEPT_CLASS_ID  FROM RD_OMOP_PROD..CONCEPT GROUP BY 2;
+SELECT DISTINCT CONCEPT_CLASS_ID FROM RD_OMOP_PROD..CONDITION_OCCURRENCE CO 
+LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = CO.CONDITION_CONCEPT_ID WHERE C.DOMAIN_ID = 'Condition'
+;
+
+SELECT CO.* FROM RD_OMOP_PROD..OBSERVATION CO LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = CO.OBSERVATION_CONCEPT_ID WHERE C.DOMAIN_ID = 'Condition' 
+
+;
+
+SELECT * FROM RD_OMOP_PROD..CONCEPT 
+WHERE CONCEPT_ID IN 
+(SELECT DISTINCT OBSERVATION_SOURCE_CONCEPT_ID  
+FROM RD_OMOP_PROD..OBSERVATION CO LEFT JOIN RD_OMOP_PROD..CONCEPT C ON C.CONCEPT_ID = CO.OBSERVATION_CONCEPT_ID WHERE C.DOMAIN_ID = 'Condition' 
+);
+--'134781000119106'
+
+select distinct RAW_CONDITION_SOURCE   from condition;
+select count(*) from condition;
+-- 211,976,300
+TRUNCATE TABLE CONDITION;
+INSERT INTO CONDITION 
+SELECT
+	NEXT VALUE FOR CDRN..CDM_CONDITION_SEQ AS CONDITIONID
+    , Y.* 
+FROM
+	(
+		SELECT DISTINCT
+	X.PATID
+	,NULL AS ENCOUNTERID
+	,OBSERVATION_DATE  AS REPORT_DATE
+	,NULL AS RESOLVE_DATE
+			,NULL AS ONSET_DATE
+			,NULL AS CONDITION_STATUS 
+	
+			, --SUBSTR(TRIM(CONCEPT_NAME),1,18)
+			C.CONCEPT_CODE
+			 AS CONDITION
+			--,'HP' AS CONDITION_TYPE
+			,CASE WHEN C.VOCABULARY_ID = 'SNOMED' THEN 'SM'
+				  ELSE 'OT'
+			  END AS CONDITION_TYPE
+			
+			,'HC' CONDITION_SOURCE
+			,NULL AS RAW_CONDITION_STATUS
+		 
+			, SUBSTR(TRIM(CONCEPT_NAME),1,64) 
+			 AS RAW_CONDITION
+		    --,NULL AS RAW_CONDITION_TYPE 
+			,C.VOCABULARY_ID AS RAW_CONDITION_TYPE
+		    ,X_SRC  AS RAW_CONDITION_SOURCE 
+		FROM
+			RD_OMOP_PROD..OBSERVATION OB
+			LEFT JOIN RD_OMOP_PROD..CONCEPT AS C ON C.CONCEPT_ID = OB.OBSERVATION_CONCEPT_ID
+			LEFT JOIN RD_OMOP_PROD..PERSON AS P ON OB.PERSON_ID = P.PERSON_ID
+			LEFT JOIN CDRN_VUMC_DEV..CDM_PATID_MRN_XWALK AS X ON X.MRN = P.PERSON_SOURCE_VALUE
+			LEFT JOIN CDRN_VUMC_DEV..DEATH AS DE ON DE.PATID = X.PATID
+			JOIN CDRN_VUMC_DEV..DEMOGRAPHIC AS D ON D.PATID = X.PATID
+		,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') AS DT
+	WHERE
+		C.DOMAIN_ID = 'Condition' AND
+		OB.OBSERVATION_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE
+		
+		AND 
+		OB.OBSERVATION_DATE BETWEEN NVL(D.BIRTH_DATE,'01-01-1900') AND NVL(DE.DEATH_DATE,CURRENT_DATE)
+		
+	)Y 
+	
+	;
+	-- 159791
+INSERT INTO CONDITION 
+SELECT
+	NEXT VALUE FOR CDRN..CDM_CONDITION_SEQ AS CONDITIONID
+    , Y.* 
+FROM	
+	(
+	SELECT DISTINCT
+	X.PATID
+	,NULL AS ENCOUNTERID
+	,condition_start_DATE  AS REPORT_DATE
+	,NULL AS RESOLVE_DATE
+			,NULL AS ONSET_DATE
+			,NULL AS CONDITION_STATUS 
+	
+			, --SUBSTR(TRIM(CONCEPT_NAME),1,18)
+			C.CONCEPT_CODE
+			 AS CONDITION
+			--,'HP' AS CONDITION_TYPE
+			,CASE WHEN C.VOCABULARY_ID = 'SNOMED' THEN 'SM'
+				  ELSE 'OT'
+			  END AS CONDITION_TYPE
+			
+			,'HC' CONDITION_SOURCE
+			,NULL AS RAW_CONDITION_STATUS
+		 
+			, SUBSTR(TRIM(CONCEPT_NAME),1,64) 
+			 AS RAW_CONDITION
+		    --,NULL AS RAW_CONDITION_TYPE 
+			,C.VOCABULARY_ID AS RAW_CONDITION_TYPE
+		    ,null  AS RAW_CONDITION_SOURCE 
+		FROM
+			RD_OMOP_PROD..CONDITION_OCCURRENCE OB
+			LEFT JOIN RD_OMOP_PROD..CONCEPT AS C ON C.CONCEPT_ID = OB.condition_CONCEPT_ID
+			LEFT JOIN RD_OMOP_PROD..PERSON AS P ON OB.PERSON_ID = P.PERSON_ID
+			LEFT JOIN CDRN_VUMC_DEV..CDM_PATID_MRN_XWALK AS X ON X.MRN = P.PERSON_SOURCE_VALUE
+			LEFT JOIN CDRN_VUMC_DEV..DEATH AS DE ON DE.PATID = X.PATID
+			JOIN CDRN_VUMC_DEV..DEMOGRAPHIC AS D ON D.PATID = X.PATID
+		,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') AS DT
+	WHERE
+		C.DOMAIN_ID = 'Condition' AND
+		CONDITION_START_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE
+		--AND NVL(OBS_DATE,DT.EVT_START_DATE) >= NVL(D.BIRTH_DATE,'01-01-1900')
+		AND 
+		CONDITION_START_DATE BETWEEN NVL(D.BIRTH_DATE,'01-01-1900') AND NVL(DE.DEATH_DATE,CURRENT_DATE)
+		)
+		Y
+
+	-- 61498963
+	;
+	
+	
+INSERT INTO CONDITION 
+SELECT
+	NEXT VALUE FOR CDRN..CDM_CONDITION_SEQ AS CONDITIONID
+    , Y.* 
+FROM	
+	(
+	SELECT DISTINCT
+	X.PATID
+	,NULL AS ENCOUNTERID
+	,NOTE_DATE  AS REPORT_DATE
+	,NULL AS RESOLVE_DATE
+			,NULL AS ONSET_DATE
+			,NULL AS CONDITION_STATUS 
+			, SUBSTR(TRIM(NOTE_TEXT),1,18) AS CONDITION
+			--,'HP' AS CONDITION_TYPE
+			, 'OT' AS CONDITION_TYPE
+			,'HC' CONDITION_SOURCE
+			,NULL AS RAW_CONDITION_STATUS
+			,SUBSTR(TRIM(NOTE_TEXT),1,64) AS RAW_CONDITION
+		    --,NULL AS RAW_CONDITION_TYPE 
+			,SUBSTR(TRIM(NOTE_TITLE),1,64)  AS RAW_CONDITION_TYPE
+		    ,SUBSTR(TRIM(NOTE_SOURCE_VALUE),1,64)    AS RAW_CONDITION_SOURCE 
+		FROM
+			RD_OMOP_PROD..NOTE OB
+			--LEFT JOIN RD_OMOP_PROD..CONCEPT AS C ON C.CONCEPT_ID = OB.NOTE_TYPE_CONCEPT_ID
+			LEFT JOIN RD_OMOP_PROD..PERSON AS P ON OB.PERSON_ID = P.PERSON_ID
+			LEFT JOIN CDRN_VUMC_DEV..CDM_PATID_MRN_XWALK AS X ON X.MRN = P.PERSON_SOURCE_VALUE
+			LEFT JOIN CDRN_VUMC_DEV..DEATH AS DE ON DE.PATID = X.PATID
+			JOIN CDRN_VUMC_DEV..DEMOGRAPHIC AS D ON D.PATID = X.PATID
+		,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') AS DT
+	WHERE
+		UPPER(NOTE_TITLE) = 'PROBLEM LIST' and --UPPER(X_DOC_TYPE) = 'PSS' AND
+		NOTE_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE
+		AND 
+		NOTE_DATE BETWEEN NVL(D.BIRTH_DATE,'01-01-1900') AND NVL(DE.DEATH_DATE,CURRENT_DATE)
+		)
+		Y
+
+;
+-- 449523937
+
+SELECT COUNT(*) FROM CONDITION; 					  --511182691
+SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..CONDITION; --211976300
+
+SELECT COUNT(*), CONDITION_TYPE  FROM CDRN_VUMC_DEV..CONDITION GROUP BY 2;
+
+--COUNT	CONDITION_TYPE
+--449523937	OT
+--61658754	SM
+SELECT COUNT(*), CONDITION_TYPE   FROM CDRN_VUMC_PRODUCTION..CONDITION GROUP BY 2;
+
+--COUNT	CONDITION_TYPE
+--208073277	OT
+--3903023	SM
+----
+---------############################################################--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##---------------------- RX_PROVIDER_XWALK----------------##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################--------
+
+SELECT COUNT(*) FROM CDRN_VUMC_PRODUCTION..RX_PROVIDER_XWALK; --8634
+
+
+
+TRUNCATE TABLE RX_PROVIDER_XWALK;
+
+INSERT INTO RX_PROVIDER_XWALK
+SELECT
+	NEXT VALUE FOR CDRN..CDM_PROVIDER_SEQ AS RX_PROVIDERID
+	, Y.*
+FROM
+	(SELECT DISTINCT
+	D.PROVIDER_ID AS RX_PROVIDER_ID
+	,PROVIDER_SOURCE_VALUE AS VUMC_RX_PROV_ID
+  FROM RD_OMOP_PROD..DRUG_EXPOSURE D INNER JOIN RD_OMOP_PROD..PROVIDER P ON D.PROVIDER_ID = P.PROVIDER_ID
+) Y
+;
+-- 17505
+SELECT COUNT(*) FROM RX_PROVIDER_XWALK; --24041
+
+---------############################################################--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##----------- DRUG EXPOSURE -> PRESCRIBING----------------##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################--------
+
+TRUNCATE TABLE PRESCRIBING_U;
+INSERT INTO PRESCRIBING_U
+( SELECT DISTINCT
+         X.PATID
+         ,EX.ENCOUNTERID AS ENCOUNTERID
+         ,PX.RX_PROVIDERID AS RX_PROVIDERID 
+        ,MEDS.DRUG_EXPOSURE_START_DATE::date AS RX_ORDER_DATE
+        ,TO_CHAR(MEDS.DRUG_EXPOSURE_START_DATETIME, 'HH24:MI') AS RX_ORDER_TIME
+		
+        ,MEDS.DRUG_EXPOSURE_START_DATE::date AS RX_START_DATE
+        ,NULL AS RX_END_DATE
+        ,NULL AS RX_QUANTITY
+        ,NULL AS RX_QUANTITY_UNIT
+        ,REFILLS AS RX_REFILLS --YJ: get for rxstar records
+        ,DAYS_SUPPLY  AS RX_DAYS_SUPPLY
+       --,SUBSTR(X_FREQUENCY, 1, 64)  AS RX_FREQUENCY  
+	   , NULL AS RX_FREQUENCY  
+        --,DECODE( MEDS.X_SRC, 'RXSTAR', '01', 'HEO', '02', 'HMM', '02', 'DOC', 'NI', 'PL', 'NI', 'PAML', 'NI', 'NI') AS RX_BASIS  --YJ: RXSTAR -> '01'
+		--, CASE WHEN X_DOC_TYPE = 'RXSTAR' THEN '01'
+		--       WHEN X_DOC_TYPE IN ('HEO', 'HMM') THEN '02'
+		--       ELSE 'NI' END AS RX_BASIS
+        ,CASE WHEN DRUG_TYPE_CONCEPT_ID = 38000177 THEN '01'
+		 WHEN DRUG_TYPE_CONCEPT_ID = 38000179 THEN '02'
+		 ELSE 'NI' END
+		AS RX_BASIS
+		,NVL(C.CONCEPT_CODE::VARCHAR(8), 'NI') AS RXNORM_CUI
+          --,CASE WHEN RXNORM_ID IS NULL OR RXNORM_ID = '' THEN 'NI' ELSE TRIM(RXNORM_ID) END AS RXNORM_CUI
+        ,SUBSTR(DRUG_SOURCE_VALUE, 1, 64) AS RAW_RX_MED_NAME
+       -- ,SUBSTR(X_FREQUENCY, 1, 64) AS RAW_RX_FREQUENCY
+		, NULL AS RAW_RX_FREQUENCY
+         ,C.CONCEPT_CODE::VARCHAR(8) AS RAW_RXNORM_CUI
+          ,NULL AS RAW_RX_QUANTITY
+          ,NULL AS RAW_RX_NDC                          
+    FROM 
+        RD_OMOP_PROD..DRUG_EXPOSURE AS MEDS 
+		LEFT JOIN RD_OMOP_PROD..X_DRUG_EXPOSURE AS MEDS_X ON MEDS.DRUG_EXPOSURE_ID = MEDS_X.DRUG_EXPOSURE_ID
+		JOIN RD_OMOP_PROD..CONCEPT AS C ON C.CONCEPT_ID = MEDS.DRUG_CONCEPT_ID AND C.DOMAIN_ID ='Drug' AND C.VOCABULARY_ID = 'RxNorm'
+        LEFT JOIN RD_OMOP_PROD..PERSON AS P ON P.PERSON_ID = MEDS.PERSON_ID
+		JOIN CDRN_VUMC_DEV..CDM_PATID_MRN_XWALK AS X ON P.PERSON_SOURCE_VALUE = X.MRN
+       
+        LEFT JOIN CDRN_VUMC_DEV..RX_PROVIDER_XWALK AS PX on PX.RX_PROVIDER_ID = MEDS.PROVIDER_ID 
+        LEFT JOIN CDRN_VUMC_DEV..ENCOUNTER_XWALK AS EX on MEDS.VISIT_OCCURRENCE_ID = EX.VISIT_OCCURRENCE_ID
+	WHERE MEDS.DRUG_TYPE_CONCEPT_ID IN (38000177 ,38000179)					
+)
+
+;
+
+
+-- 90786320
+-- 79748163
+TRUNCATE TABLE PRESCRIBING;
+
+INSERT INTO PRESCRIBING
+SELECT 
+	NEXT VALUE FOR CDRN..CDM_PRESCRIBING_SEQ AS PRESCRIBINGID
+	,MEDS.*  
+	FROM PRESCRIBING_U MEDS
+                    JOIN CDRN_VUMC_DEV..DEMOGRAPHIC AS DU ON meds.PATID = DU.PATID
+                    LEFT JOIN CDRN_VUMC_DEV..DEATH AS DE ON DE.PATID = DU.PATID
+					,(SELECT * FROM CDRN..CUT_OFF_DATE WHERE UPPER(DC_VERSION) = 'CYCLE_4_2') AS DT
+                WHERE 
+                   	MEDS.RX_START_DATE BETWEEN DT.EVT_START_DATE AND DT.EVT_END_DATE
+                    AND NVL(DE.DEATH_DATE, CURRENT_DATE) >= MEDS.RX_START_DATE 
+                    AND NVL(DU.BIRTH_DATE, '01-01-1900') <= MEDS.RX_START_DATE
+		;
+-- 78299293
+		
+---------############################################################--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##----------- PRESCRIBING -> SUPPLEMENTAL TABLE-----------##---------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################--------
+
+
+SELECT COUNT(*) FROM SUPPLEMENTAL_TABLE; --44480
+
+TRUNCATE TABLE SUPPLEMENTAL_TABLE;
+		
+INSERT INTO SUPPLEMENTAL_TABLE
+SELECT * FROM 
+(SELECT
+		DISTINCT
+		NULL AS RX_PROVIDERID
+		,C.PROVIDERID::VARCHAR(64) AS PROVIDERID
+		,B.TAXO1 AS TAXO
+  
+	FROM
+		RD_OMOP_PROD..PROVIDER A
+		,CDRN_VUMC_PENDING..NPI_TAXO B
+		,CDRN_VUMC_DEV..PROVIDER_XWALK C
+	WHERE A.NPI=B.NPI
+			AND C.VUMC_PROV_ID = A.PROVIDER_SOURCE_VALUE
+			AND B.TAXO1 IS NOT NULL
+UNION ALL
+SELECT
+		DISTINCT 
+		C.RX_PROVIDERID::VARCHAR(64) AS RX_PROVIDERID,
+		NULL AS PROVIDERID,
+		B.TAXO1 AS TAXO		
+	FROM
+		RD_OMOP_PROD..PROVIDER A
+		,CDRN_VUMC_PENDING..NPI_TAXO B
+		,CDRN_VUMC_DEV..RX_PROVIDER_XWALK C
+		
+	WHERE A.NPI=B.NPI
+			AND A.PROVIDER_SOURCE_VALUE = C.VUMC_RX_PROV_ID 
+			AND B.TAXO1 IS NOT NULL
+ORDER BY TAXO) UNN;
+
+--94,892
+
+SELECT *  FROM CDRN_VUMC_PRODUCTION..SUPPLEMENTAL_TABLE;
+SELECT *  FROM CDRN_VUMC_DEV..SUPPLEMENTAL_TABLE ORDER BY TAXO;
+-- 28,821
+
+---------############################################################--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------##-------GENERATE NEW---- ABX_MATERNAL_CHILD_TABLE--------##--------
+---------##--------------------------------------------------------##--------
+---------##--------------------------------------------------------##--------
+---------############################################################--------
+
+TRUNCATE TABLE ABX_MATERNAL_CHILD_TABLE;
+INSERT INTO ABX_MATERNAL_CHILD_TABLE          
+SELECT 
+            NEXT VALUE FOR CDRN..MATERNAL_CHILD_LINKAGE AS LINKID
+            ,PATID_C
+            ,PATID_M
+            ,INDEX_DATE
+            ,GEST_AGE GEST_AGE
+            ,BIRTH_WT
+FROM
+            (
+              SELECT DISTINCT
+                                    X2.PATID AS PATID_C
+                                    ,X1.PATID AS PATID_M
+                                    ,D2.BIRTH_DATE AS INDEX_DATE
+                                    ,MAX(GEST.FIELD_VALUE*7) AS GEST_AGE
+                                    ,MAX(CASE WHEN OB.WEIGHT_GRAMS IS NULL THEN (CAST(V.WT AS FLOAT) * 454) ELSE CAST(OB.WEIGHT_GRAMS AS FLOAT) END) AS BIRTH_WT
+                        FROM
+                                    RDETL..OBGYN_OBGYN_BABY AS OB
+                                    LEFT JOIN CDRN..V_BABY_GEST_AGE AS GEST ON GEST.MRN = OB.MOTHER_MRN --get GEST_AGE in weeks
+                                    JOIN CDRN_VUMC_PRODUCTION..CDM_PATID_MRN_XWALK AS X1 ON OB.MOTHER_MRN = X1.MRN --get MOTHER patid
+                                    --JOIN CDRN_VUMC_PRODUCTION..DEMOGRAPHIC AS D1 ON D1.PATID = X1.PATID
+                                    JOIN CDRN_VUMC_PRODUCTION..CDM_PATID_MRN_XWALK AS X2 ON OB.MRN = X2.MRN --get CHILD patid
+                                    LEFT JOIN CDRN_VUMC_PRODUCTION..VITAL AS V ON V.PATID = X2.PATID AND V.MEASURE_DATE = OB.INFANT_DELIVERY_DATE_TIME --get birth weight
+                                    JOIN CDRN_VUMC_PRODUCTION..DEMOGRAPHIC AS D2 ON D2.PATID = X2.PATID --get DOB
+                        GROUP BY
+                                    1,2,3
+            ) Y          
+			
+--------------------------
+
+ -- unqualified patid insert into the demographic
+SELECT * FROM DEMOGRAPHIC WHERE PATID = 1138514;
+SELECT * FROM DEMOGRAPHIC_BAK WHERE PATID = 1138514;
+INSERT INTO DEMOGRAPHIC SELECT * FROM DEMOGRAPHIC_BAK WHERE PATID = 1138514;
+SELECT * FROM CDM_PATID_MRN_XWALK WHERE PATID = 1138514;
+SELECT * FROM CDRN_VUMC_PRODUCTION..PCORNET_TRIAL WHERE PATID = 1138514; 
+SELECT * FROM PCORNET_TRIAL WHERE PATID = 1138514; 
+ 
+ 
+------------------------------------------------------------------------------------------------------------------------
+TRUNCATE TABLE HARVEST;
+
+INSERT INTO HARVEST
+      (
+        NETWORKID
+        ,NETWORK_NAME
+        ,DATAMARTID
+        ,DATAMART_NAME
+        ,DATAMART_PLATFORM
+        ,CDM_VERSION
+        ,DATAMART_CLAIMS
+        ,DATAMART_EHR
+        ,BIRTH_DATE_MGMT
+        ,ENR_START_DATE_MGMT
+        ,ENR_END_DATE_MGMT
+        ,ADMIT_DATE_MGMT
+        ,DISCHARGE_DATE_MGMT
+        ,PX_DATE_MGMT
+        ,RX_ORDER_DATE_MGMT
+        ,RX_START_DATE_MGMT
+        ,RX_END_DATE_MGMT
+        ,DISPENSE_DATE_MGMT
+        ,LAB_ORDER_DATE_MGMT
+        ,SPECIMEN_DATE_MGMT
+        ,RESULT_DATE_MGMT
+        ,MEASURE_DATE_MGMT
+        ,ONSET_DATE_MGMT
+        ,REPORT_DATE_MGMT
+        ,RESOLVE_DATE_MGMT
+        ,PRO_DATE_MGMT
+        ,REFRESH_DEMOGRAPHIC_DATE
+        ,REFRESH_ENROLLMENT_DATE
+        ,REFRESH_ENCOUNTER_DATE
+        ,REFRESH_DIAGNOSIS_DATE
+        ,REFRESH_PROCEDURES_DATE
+        ,REFRESH_VITAL_DATE
+        ,REFRESH_DISPENSING_DATE
+        ,REFRESH_LAB_RESULT_CM_DATE
+        ,REFRESH_CONDITION_DATE
+        ,REFRESH_PRO_CM_DATE
+        ,REFRESH_PRESCRIBING_DATE
+        ,REFRESH_PCORNET_TRIAL_DATE
+        ,REFRESH_DEATH_DATE
+        ,REFRESH_DEATH_CAUSE_DATE
+      )
+      Values
+      (
+        'C2' AS NETWORKID
+        ,'Mid-South' AS NETWORK_NAME
+        ,'C2VAN'AS DATAMARTID
+        ,'Vanderbilt' AS DATAMART_NAME
+        --,'03' AS DATAMART_PLATFORM -- Netezza is flavor of Postgres sql, CC wanted us to use OT as the datamart platform
+        ,'OT' AS DATAMART_PLATFORM
+        ,'3.13' AS CDM_VERSION  --YJ: should be 3.1 now
+        ,'01' AS DATAMART_CLAIMS
+        ,'02' AS DATAMART_EHR
+        ,'02' AS BIRTH_DATE_MGMT
+        ,'02' AS ENR_START_DATE_MGMT
+        ,'02' AS ENR_END_DATE_MGMT
+        ,'02' AS ADMIT_DATE_MGMT
+        ,'02' AS DISCHARGE_DATE_MGMT
+        ,'02' AS PX_DATE_MGMT
+        ,'02' AS RX_ORDER_DATE_MGMT
+        ,'02' AS RX_START_DATE_MGMT
+        ,'02' AS RX_END_DATE_MGMT
+        ,'02' AS DISPENSE_DATE_MGMT
+        ,'02' AS LAB_ORDER_DATE_MGMT
+        ,'02' AS SPECIMEN_DATE_MGMT
+        ,'02' AS RESULT_DATE_MGMT
+        ,'02' AS MEASURE_DATE_MGMT
+        ,'02' AS ONSET_DATE_MGMT
+        ,'02' AS REPORT_DATE_MGMT
+        ,'02' AS RESOLVE_DATE_MGMT
+        ,'02' AS PRO_DATE_MGMT
+        ,NOW() AS REFRESH_DEMOGRAPHIC_DATE
+        ,NOW() AS REFRESH_ENROLLMENT_DATE
+        ,NOW() AS REFRESH_ENCOUNTER_DATE
+        ,NOW() AS REFRESH_DIAGNOSIS_DATE
+        ,NOW() AS REFRESH_PROCEDURES_DATE
+        ,NOW() AS REFRESH_VITAL_DATE
+        ,NOW() AS REFRESH_DISPENSING_DATE
+        ,NOW() AS REFRESH_LAB_RESULT_CM_DATE
+        ,NOW() AS REFRESH_CONDITION_DATE
+        ,NULL AS REFRESH_PRO_CM_DATE
+        ,NOW() AS REFRESH_PRESCRIBING_DATE
+        ,NOW() AS REFRESH_PCORNET_TRIAL_DATE
+        ,NOW() AS REFRESH_DEATH_DATE
+        ,NOW() AS REFRESH_DEATH_CAUSE_DATE
+      );
+ 
+ SELECT * FROM HARVEST;
+ SELECT * FROM CDRN_VUMC_PRODUCTION..HARVEST;
+ 
+ /***********************************
+
+	DELETE 
+		BIRTH > DATE
+
+*************************************/
+ 
+ DELETE FROM PRESCRIBING
+	WHERE PRESCRIBINGID IN (
+							SELECT DISTINCT
+								PRESCRIBINGID
+							FROM
+								PRESCRIBING  V
+								LEFT JOIN DEMOGRAPHIC DE
+									ON DE.PATID = V.PATID
+							WHERE
+								BIRTH_DATE > V.RX_START_DATE
+						  )
+;
+
+-------------------------
+DELETE FROM VITAL
+	WHERE VITALID IN (
+							SELECT DISTINCT
+								VITALID
+							FROM
+								VITAL  V
+								LEFT JOIN DEMOGRAPHIC DE
+									ON DE.PATID = V.PATID
+							WHERE
+								BIRTH_DATE > V.MEASURE_DATE
+						  )
+
+;
+
+-----------------------------
+DELETE FROM LAB_RESULT_CM
+	WHERE LAB_RESULT_CM_ID IN (
+							SELECT DISTINCT
+								LAB_RESULT_CM_ID
+							FROM
+								LAB_RESULT_CM  V
+								LEFT JOIN DEMOGRAPHIC DE
+									ON DE.PATID = V.PATID
+							WHERE
+								BIRTH_DATE > V.RESULT_DATE
+						  )
+;
+--------------------------------------------------
+DELETE FROM DISPENSING 
+	WHERE DISPENSINGID IN (
+							SELECT DISTINCT
+								DISPENSINGID
+							FROM
+								DISPENSING  V
+								LEFT JOIN DEMOGRAPHIC DE
+									ON DE.PATID = V.PATID
+							WHERE
+								BIRTH_DATE > V.DISPENSE_DATE
+						  )
+;
+-------------------------------------------------------
+	DELETE FROM ENCOUNTER
+	WHERE ENCOUNTERID IN (
+							SELECT DISTINCT
+								ENCOUNTERID
+							FROM
+								ENCOUNTER  V
+								LEFT JOIN DEMOGRAPHIC DE
+									ON DE.PATID = V.PATID
+							WHERE
+								BIRTH_DATE > V.ADMIT_DATE
+						  )
+;
+--------------------------------------------------------
+DELETE FROM PROCEDURES
+	WHERE PROCEDURESID IN (
+							SELECT DISTINCT
+								PROCEDURESID
+							FROM
+								PROCEDURES  V
+								LEFT JOIN DEMOGRAPHIC DE
+									ON DE.PATID = V.PATID
+							WHERE
+								BIRTH_DATE > V.ADMIT_DATE
+						  )
+;
+------------------------------------------------------------
+DELETE FROM DIAGNOSIS
+	WHERE DIAGNOSISID IN (
+							SELECT DISTINCT
+								DIAGNOSISID
+							FROM
+								DIAGNOSIS  V
+								LEFT JOIN DEMOGRAPHIC DE
+									ON DE.PATID = V.PATID
+							WHERE
+								BIRTH_DATE > V.ADMIT_DATE
+						  )
+;
+
+
+/***********************************
+
+	DELETE 
+		DEATH < DATE
+
+*************************************/
+
+DELETE FROM PRESCRIBING
+	WHERE PRESCRIBINGID IN (
+							SELECT DISTINCT
+								V.PRESCRIBINGID
+							FROM
+								PRESCRIBING  V
+								LEFT JOIN DEATH DE
+									ON DE.PATID = V.PATID
+							WHERE
+								NVL(DE.DEATH_DATE,CURRENT_DATE) < V.RX_START_DATE
+						  )
+;
+
+-------------------------------------------------------
+DELETE FROM VITAL
+	WHERE VITALID IN (
+							SELECT DISTINCT
+								VITALID
+							FROM
+								VITAL  V
+								LEFT JOIN DEATH DE
+									ON DE.PATID = V.PATID
+							WHERE
+								 NVL(DE.DEATH_DATE,CURRENT_DATE) < V.MEASURE_DATE
+						  )
+
+;
+----------------------------------------------------
+
+	DELETE FROM LAB_RESULT_CM --should use SPECIMEN_DATE
+	WHERE LAB_RESULT_CM_ID IN (
+							SELECT DISTINCT
+								LAB_RESULT_CM_ID
+							FROM
+								LAB_RESULT_CM  V
+								LEFT JOIN DEATH DE
+									ON DE.PATID = V.PATID
+							WHERE
+								 NVL(DE.DEATH_DATE,CURRENT_DATE) < V.SPECIMEN_DATE
+						  )
+;
+-----------------------------------------------------
+DELETE FROM DISPENSING
+	WHERE DISPENSINGID IN (
+							SELECT DISTINCT
+								DISPENSINGID
+							FROM
+								DISPENSING  V
+								LEFT JOIN DEATH DE
+									ON DE.PATID = V.PATID
+							WHERE
+								 NVL(DE.DEATH_DATE,CURRENT_DATE) < V.DISPENSE_DATE
+						  )
+
+;
+
+-------------------------------------------------------------------------------------
+	DELETE FROM ENCOUNTER
+	WHERE ENCOUNTERID IN (
+							SELECT DISTINCT
+								ENCOUNTERID
+							FROM
+								ENCOUNTER  V
+								LEFT JOIN DEATH DE
+									ON DE.PATID = V.PATID
+							WHERE
+								 NVL(DE.DEATH_DATE,CURRENT_DATE) < V.ADMIT_DATE
+						  )
+;
+-----------------------------------------------------------------------------------------
+DELETE FROM PROCEDURES
+	WHERE PROCEDURESID IN (
+							SELECT DISTINCT
+								PROCEDURESID
+							FROM
+								PROCEDURES  V
+								LEFT JOIN DEATH DE
+									ON DE.PATID = V.PATID
+							WHERE
+								 NVL(DE.DEATH_DATE,CURRENT_DATE) < V.ADMIT_DATE
+						  )
+
+;
+------------------------------------------------------------------------------------------
+DELETE FROM DIAGNOSIS
+	WHERE DIAGNOSISID IN (
+							SELECT DISTINCT
+								DIAGNOSISID
+							FROM
+								DIAGNOSIS  V
+								LEFT JOIN DEATH DE
+									ON DE.PATID = V.PATID
+							WHERE
+								 NVL(DE.DEATH_DATE,CURRENT_DATE) < V.ADMIT_DATE
+						  )
+
+;
+
+
+/***********************************
+
+	DELETE 
+		ORPHANED PATID
+
+*************************************/
+TRUNCATE DEMOGRAPHIC_BAK;
+INSERT INTO DEMOGRAPHIC_BAK SELECT * FROM DEMOGRAPHIC; -- 1777131
+DELETE FROM DEMOGRAPHIC
+--WHERE PATID NOT IN (SELECT DISTINCT PATID FROM ENCOUNTER WHERE PATID IS NOT NULL)
+--;
+--SELECT DISTINCT PATID FROM DEMOGRAPHIC WHERE PATID NOT IN (SELECT PATID FROM ENCOUNTER)--19
+
+WHERE PATID IN (
+					SELECT D.PATID
+					--SELECT COUNT(*) 
+					FROM DEMOGRAPHIC D 
+					     FULL JOIN
+					(SELECT DISTINCT PATID
+					FROM DEMOGRAPHIC
+					WHERE PATID IN (SELECT PATID FROM ENCOUNTER)
+					  AND PATID IN (SELECT PATID FROM DIAGNOSIS 
+					                  UNION ALL 
+									 SELECT PATID FROM PROCEDURES 
+									  UNION ALL 
+									 SELECT PATID FROM VITAL)) V ON D.PATID = V.PATID
+					WHERE --D.PATID IS NULL --0
+					      V.PATID IS NULL --26906 
+);
+-- 27551 
+
+----------------------------------------
+DELETE FROM PRESCRIBING
+	WHERE PRESCRIBINGID IN (
+							SELECT DISTINCT
+								PRESCRIBINGID
+							FROM
+								PRESCRIBING  V
+							WHERE
+								V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+;--2485  / 2510 /2856
+
+-----------------------------------------------------
+DELETE FROM vital
+	WHERE VITALID IN (
+							SELECT DISTINCT
+								V.VITALID
+							FROM
+								vital  V
+							WHERE
+								 V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+; --2
+------------------------------------------
+
+DELETE FROM LAB_RESULT_CM
+	WHERE LAB_RESULT_CM_ID IN (
+							SELECT DISTINCT
+								V.LAB_RESULT_CM_ID
+							FROM
+								LAB_RESULT_CM  V
+								--LEFT JOIN DEMOGRAPHIC DE
+								--	ON DE.PATID = V.PATID
+							WHERE
+								  V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+;--226038  / 225490 /226084 
+
+---------------------------------------------------------------------
+
+DELETE FROM DISPENSING
+	WHERE DISPENSINGID IN (
+							SELECT DISTINCT
+								V.DISPENSINGID
+							FROM
+								DISPENSING  V
+							WHERE
+								 V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+
+;
+--------------------------------------------------------------------------
+	DELETE FROM ENCOUNTER
+	WHERE ENCOUNTERID IN (
+							SELECT DISTINCT
+								ENCOUNTERID
+							FROM
+								ENCOUNTER  V
+							WHERE
+								V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+;--98637  / 101236 /103848 
+
+------------------------------------------------------------------------------------
+DELETE FROM PROCEDURES
+	WHERE PROCEDURESID IN (
+							SELECT DISTINCT
+								V.PROCEDURESID
+							FROM
+								PROCEDURES  V
+							WHERE
+								 V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+
+;
+DELETE FROM DIAGNOSIS
+	WHERE DIAGNOSISID IN (
+							SELECT DISTINCT
+								V.DIAGNOSISID
+							FROM
+								DIAGNOSIS  V
+							WHERE
+								  V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+
+;
+DELETE FROM DEATH
+	WHERE PATID IN (
+							SELECT DISTINCT
+								V.PATID
+							FROM
+								DEATH  V
+							WHERE
+								  V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+;--349 / 349/349
+
+
+DELETE FROM CONDITION
+	WHERE CONDITIONID IN (
+							SELECT DISTINCT
+								V.CONDITIONID
+							FROM
+								CONDITION  V
+							WHERE
+								  V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+;--17096  /  17222 /17376
+
+
+--------------------------------------
+DELETE FROM DEATH_CAUSE
+	WHERE PATID IN (
+							SELECT DISTINCT
+								V.PATID
+							FROM
+								DEATH_CAUSE  V
+							WHERE
+								  V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+;
+
+--YJ: added
+DELETE FROM ENROLLMENT
+	WHERE PATID IN (
+							SELECT DISTINCT
+								V.PATID
+							FROM
+								ENROLLMENT  V
+							WHERE
+								  V.PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+						  )
+;--26078  / 26887 /27531 
+
+
+-- remove unqualified prescribing encounters
+DELETE FROM PRESCRIBING
+		WHERE ENCOUNTERID 
+				NOT IN 
+				(SELECT ENCOUNTERID FROM ENCOUNTER);
+				
+	/******************************************************************************************************
+					ORPHANED PATID**
+	********************************************************************************************************/
+TRUNCATE ORPHANED_PATID;
+INSERT INTO ORPHANED_PATID
+
+SELECT * 
+FROM (
+
+		SELECT DISTINCT 'ENROLLMENT',COUNT(*) AS ORPHANED_PATID FROM ENROLLMENT WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL
+		SELECT DISTINCT 'ENCOUNTER',COUNT(*) AS ORPHANED_PATID FROM ENCOUNTER WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL
+		SELECT DISTINCT 'DIAGNOSIS',COUNT(*) AS ORPHANED_PATID FROM DIAGNOSIS WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL 
+		SELECT DISTINCT 'PROCEDURES', COUNT(*) AS ORPHANED_PATID FROM PROCEDURES WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL
+		SELECT DISTINCT 'VITAL', COUNT(*) AS ORPHANED_PATID FROM VITAL WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL 
+		SELECT DISTINCT 'DISPENSING',COUNT(*) AS ORPHANED_PATID FROM DISPENSING WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL
+		SELECT DISTINCT 'LAB_RESULT_CM',COUNT(*) AS ORPHANED_PATID FROM LAB_RESULT_CM WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL
+		SELECT DISTINCT 'PRESCRIBING',COUNT(*) AS ORPHANED_PATID FROM PRESCRIBING WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL
+		SELECT DISTINCT 'CONDITION',COUNT(*) AS ORPHANED_PATID FROM CONDITION WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL
+		SELECT DISTINCT 'DEATH',COUNT(*) AS ORPHANED_PATID FROM DEATH WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+		UNION ALL
+		SELECT DISTINCT 'DEATH_CAUSE',COUNT(*) AS ORPHANED_PATID FROM DEATH_CAUSE WHERE PATID NOT IN (SELECT DISTINCT PATID FROM DEMOGRAPHIC)
+)X
+;
+--11 
+
+TRUNCATE CHECKS_BALANCES;
+INSERT INTO CHECKS_BALANCES
+SELECT * 
+FROM 
+	(
+		SELECT 'DEMOGRAPHIC' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID) PATID 		FROM DEMOGRAPHIC V
+		UNION ALL															   	
+		SELECT 'ENROLLMENT' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID) PATID 		FROM ENROLLMENT V 
+		UNION ALL															   	
+		SELECT 'ENCOUNTER' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 		FROM ENCOUNTER  V
+		UNION ALL															   	
+		SELECT 'DIAGNOSIS' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 		FROM DIAGNOSIS  V
+		UNION ALL															   	
+		SELECT 'PROCEDURES' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 		FROM PROCEDURES  V
+		UNION ALL
+		SELECT 'VITAL' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 			FROM VITAL  V
+		UNION ALL
+		SELECT 'DISPENSING' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 		FROM DISPENSING  V
+		UNION ALL
+		SELECT 'LAB_RESULT_CM' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 	FROM LAB_RESULT_CM  V
+		UNION ALL
+		SELECT 'CONDITION' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 		FROM CONDITION
+		UNION ALL
+		SELECT 'PRESCRIBING' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID) PATID 		FROM PRESCRIBING  V
+		UNION ALL
+		SELECT 'DEATH' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 			FROM DEATH
+		UNION ALL
+		SELECT 'DEATH_CAUSE' TABLE_NAME ,COUNT(*), COUNT(DISTINCT PATID)  PATID 	FROM DEATH_CAUSE
+	)X ;
+
+
+
+--GENERATE STATISTICS ON ABX_MATERNAL_CHILD_TABLE;
+GENERATE STATISTICS ON CDM_PATID_MRN_XWALK;
+GENERATE STATISTICS ON CONDITION;
+GENERATE STATISTICS ON DEATH;
+GENERATE STATISTICS ON DEATH_CAUSE;
+GENERATE STATISTICS ON DEMOGRAPHIC;
+GENERATE STATISTICS ON DIAGNOSIS;
+GENERATE STATISTICS ON DISPENSING;
+GENERATE STATISTICS ON ENCOUNTER;
+GENERATE STATISTICS ON ENCOUNTER_XWALK;
+GENERATE STATISTICS ON ENROLLMENT;
+GENERATE STATISTICS ON HARVEST;
+GENERATE STATISTICS ON LAB_RESULT_CM;
+GENERATE STATISTICS ON PCORNET_TRIAL;
+GENERATE STATISTICS ON PRESCRIBING;
+GENERATE STATISTICS ON PRO_CM;
+GENERATE STATISTICS ON PROCEDURES;
+GENERATE STATISTICS ON PROVIDER_XWALK;
+GENERATE STATISTICS ON RX_PROVIDER_XWALK;
+GENERATE STATISTICS ON SUPPLEMENTAL_TABLE;
+GENERATE STATISTICS ON VITAL;
